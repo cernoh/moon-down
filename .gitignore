@@ -1,0 +1,6 @@
+/.design/
+target/
+.env
+*.swp
+*~
+.DS_Store
