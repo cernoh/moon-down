@@ -1,0 +1,217 @@
+<!doctype html>
+<!-- THROWAWAY prototype for moon-down #10 (TUI sketch). Not production. Branch: research/10-tui-sketch. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>moon-down TUI sketch — #10 (throwaway)</title>
+<style>
+  :root { color-scheme: dark; }
+  body { background:#0b0e14; color:#c9d1d9; font-family:ui-monospace,Menlo,Consolas,monospace;
+         font-size:13px; line-height:1.45; margin:0; padding:12px 12px 70px; }
+  a { color:#58a6ff; }
+  .topnote { border:1px dashed #484f58; padding:8px 10px; margin-bottom:12px; color:#8b949e; }
+  .screen { border:1px solid #30363d; margin:14px 0; }
+  .bar { background:#161b22; padding:4px 8px; border-bottom:1px solid #30363d; white-space:pre; }
+  .foot { background:#161b22; padding:4px 8px; border-top:1px solid #30363d; white-space:pre; color:#8b949e; }
+  .body { padding:6px 8px; white-space:pre; }
+  h2 { font-size:14px; margin:18px 0 4px; color:#e6edf3; }
+  .cap { color:#8b949e; font-size:12px; margin:0 0 4px; white-space:normal; }
+  .b-dl { color:#3fb950; font-weight:bold; } .b-err { color:#f85149; font-weight:bold; }
+  .b-paused { color:#d29922; font-weight:bold; } .b-done { color:#58a6ff; font-weight:bold; }
+  .b-queued { color:#39c5cf; } .b-gone { color:#bc8cff; font-weight:bold; }
+  .dim { color:#8b949e; } .hi { background:#1f6feb; color:#fff; }
+  .modal { border:2px solid #58a6ff; margin:8px 0; padding:6px 8px; white-space:pre; }
+  .cols { display:flex; gap:12px; } .cols > div { flex:1; border:1px solid #30363d; padding:6px 8px; white-space:pre; }
+  details.loop { border:1px solid #30363d; padding:6px 10px; margin-bottom:12px; white-space:normal; }
+  details.loop summary { cursor:pointer; color:#e6edf3; }
+  #switcher { position:fixed; left:50%; bottom:14px; transform:translateX(-50%);
+    background:#1f6feb; color:#fff; border-radius:999px; padding:8px 14px; font-size:14px;
+    box-shadow:0 4px 18px rgba(0,0,0,.6); user-select:none; z-index:50; }
+  #switcher button { background:none; border:none; color:#fff; font-size:16px; cursor:pointer; }
+  #help { display:none; border:1px solid #d29922; padding:8px 10px; margin:12px 0; white-space:pre; }
+  .variant { display:none; } .variant.on { display:block; }
+</style>
+</head>
+<body>
+
+<div class="topnote">THROWAWAY sketch for <b>#10 TUI screens and keybindings</b> (branch <b>research/10-tui-sketch</b>).
+Flip variants with <b>?variant=A|B|C</b>, the bottom bar, or <b>←/→</b>. Press <b>?</b> for the proposed keybindings.
+Mock data follows the #7 verdict: one row per handle, worst-case header rollup, error text on children only.</div>
+
+<details class="loop">
+<summary>Render/update loop (same under all variants — judge in Q4)</summary>
+key-event stream + 1s poll tick + completion-event fan-in → one mpsc channel → single event loop owns state →
+render-on-change only. Blocking work (extract per #11, account checks per #9) runs on <span class="dim">spawn_blocking</span>
+and posts back. Pattern: ratatui counter-async full-async <span class="dim">Tui</span>. Engine handle = GID or crate id (TBD by #13);
+"1s tick" is the poll interval, not a render timer.
+</details>
+
+<div id="help">Proposed keybindings (judge in Q2):
+  j/k or ↑/↓ move · h/l or ←/→ collapse/expand · Enter details · 1..6 jump screen · Tab next screen
+  a add dialog · space pause/resume (fan-out, per #7) · d remove (keep files) · D delete +files (confirm)
+  r retry / re-add · e retry extract (#11 ExtractFailed) · ? this help · q quit · Esc close dialog</div>
+
+<!-- ================= VARIANT A : inspector split ================= -->
+<div class="variant" id="vA">
+<h2>Variant A — inspector split (queue top, details+log bottom, modal add)</h2>
+<p class="cap">Queue stays visible at all times; selected row detail + log ride underneath. Accounts/Settings swap the top pane. Add is a centered modal.</p>
+
+<div class="screen">
+<div class="bar"> moon-down — [1]Queue  2 Details  3 Add  4 Accounts  5 Settings  6 Log</div>
+<div class="body"><span class="hi">▶ ubuntu-24.04-desktop.iso</span>  <span class="b-dl">[DL]</span> ████████████░░░░░░░░ 62%  1/1 done  8.4 MB/s
+  └─ ubuntu-24.04-desktop.iso   downloading  62%  3.1/5.0 GB  8.4 MB/s
+▼ papers-batch                <span class="b-err">[ERR]</span> ██████░░░░░░░░░░░░░░ 31%  1/3 done  —
+  ├─ paper1.pdf               <span class="b-done">complete</span>     100%  2.0 MB
+  ├─ paper2.pdf               <span class="b-err">error</span> "connection reset by peer"  <span class="dim">[r retry]</span>
+  └─ paper3.pdf               <span class="b-queued">queued</span>
+▶ debian-torrent              <span class="b-paused">[HELD]</span> ██████░░░░░░░░░░░░░░ 31%  0/1 done  — <span class="dim">(paused)</span>
+  └─ debian-12.iso (torrent)  paused       31%
+▶ old-archives                <span class="b-gone">[GONE]</span> ░░░░░░░░░░░░░░░░░░░░   0%  0/1 done  —
+  └─ backup-2024.zip          <span class="b-gone">gone</span> "handle vanished across restart"  <span class="dim">[r re-add | x prune]</span></div>
+<div class="cols" style="border-top:1px solid #30363d">
+<div>── Details: papers-batch/paper2.pdf ──
+state:    error
+progress: 41%  820/2000 KB
+handle:   &lt;engine id&gt;  (GID or crate id, per #13)
+source:   https://example.org/paper2.pdf
+error:    connection reset by peer
+package:  papers-batch → ~/dl/moon/papers  extract:ON subdir keep</div>
+<div>── Log (tail) ──
+12:01:04 tick: 2 active 3 queued
+12:01:05 event onDownloadComplete → paper1.pdf
+12:01:05 extract gated: papers-batch 1/3, waiting
+12:01:06 error paper2.pdf: connection reset</div>
+</div>
+<div class="foot"> ↓ 8.4 MB/s ↑ 1.1 MB/s · active 2 · queued 3 · complete 5 · tick 1s · [1..6] screens · ? keys </div>
+</div>
+
+<div class="screen">
+<div class="bar"> Add downloads (modal — a opens, Esc closes) </div>
+<div class="modal"> URIs (one per line):        Files: [ubuntu.torrent] [arch.metalink] [+ Add files]
+ ┌─────────────────────┐   Target dir: ~/dl/moon/papers  [browse]
+ │https://example.org/ │   [x] extract ON   (•) subdir &lt;stem&gt;/   [x] keep archives
+ │magnet:?xt=urn:btih:… │   <span class="dim">#11 defaults: ON / subdir / keep</span>
+ └─────────────────────┘   [Add package → 1 package]   [Cancel]
+ <span class="dim">Submit = one package (#7 add-unit); each file = its own package named after the file.</span></div>
+</div>
+
+<div class="screen">
+<div class="bar"> 4 Accounts (swaps top pane) </div>
+<div class="body">plugin       host            user    on   status
+generic-http example.org    alice   <span class="b-dl">on</span>  ok <span class="dim">(checked 12:00)</span>
+generic-http files.example  bob     <span class="dim">off</span>  untested
+<span class="dim">a add · t test selected · space enable/disable · secret lives in OS keyring (#5), never shown</span></div>
+</div>
+
+<div class="screen">
+<div class="bar"> 5 Settings (swaps top pane — global knobs only, v1) </div>
+<div class="body">max concurrent …… 3        global DL limit …… 0 (unlimited)
+global UL limit …… 0          split per server … 5
+connections/server … 2        <span class="dim">engine binding TBD by #13 (was changeGlobalOption)</span></div>
+</div>
+</div>
+
+<!-- ================= VARIANT B : full-screen tabs ================= -->
+<div class="variant" id="vB">
+<h2>Variant B — full-screen tabs (one screen at a time, inline expand, full-screen add form)</h2>
+<p class="cap">Maximum room per screen; queue rows expand inline with Enter. Details is a tab. Add is a full-screen form — room for long URI lists.</p>
+
+<div class="screen">
+<div class="bar"> Queue | Details | Add | Accounts | Settings | Log   <span class="dim">(Tab cycles, 1..6 jump)</span></div>
+<div class="body"><span class="hi">▶ ubuntu-24.04-desktop.iso</span>  <span class="b-dl">[DL]</span> 62% ████████████░░░░░░░░  8.4 MB/s
+▼ papers-batch                <span class="b-err">[ERR]</span> 31% ██████░░░░░░░░░░░░░░  1/3 done
+  ├─ paper1.pdf               <span class="b-done">complete</span> 100%
+  ├─ paper2.pdf               <span class="b-err">error</span> "connection reset by peer"  <span class="dim">[r]</span>
+  └─ paper3.pdf               <span class="b-queued">queued</span>
+▶ debian-torrent              <span class="b-paused">[HELD]</span> 31%  <span class="dim">paused</span>
+▶ old-archives                <span class="b-gone">[GONE]</span> 0%  <span class="dim">[r re-add | x prune]</span>
+<span class="dim">Enter expands/collapses · space pauses whole package (fan-out) · 2 opens Details for selection</span></div>
+<div class="foot"> ↓ 8.4 MB/s ↑ 1.1 MB/s · active 2 · queued 3 · complete 5 · tick 1s · ? keys </div>
+</div>
+
+<div class="screen">
+<div class="bar"> Add — full-screen form </div>
+<div class="body">Paste URIs / magnets (blank line ends):
+&gt; https://example.org/paper2.pdf
+&gt; magnet:?xt=urn:btih:…
+&gt; █
+Files: [ubuntu.torrent] [arch.metalink]  [+ Add files]     Target: ~/dl/moon/papers
+Extract: [x] ON   dest: (•) subdir &lt;stem&gt;/   [x] keep archives
+<span class="dim">[Enter] Add package · [Esc] back to Queue — one submit = one package (#7)</span></div>
+</div>
+
+<div class="screen">
+<div class="bar"> Details — papers-batch/paper2.pdf (tab) </div>
+<div class="body">state error · 41% 820/2000 KB · handle &lt;engine id&gt; · source https://example.org/paper2.pdf
+error: connection reset by peer   <span class="dim">[r retry swaps handle in place, keeps position — #7]</span>
+package papers-batch → ~/dl/moon/papers · created 11:58 · extract ON/subdir/keep</div>
+</div>
+
+<div class="screen">
+<div class="bar"> Accounts | Settings | Log (tabs, same pattern) </div>
+<div class="body"><span class="dim">Accounts:</span> generic-http example.org/alice <span class="b-dl">on</span> ok · files.example/bob <span class="dim">off</span> untested
+<span class="dim">Settings:</span> concurrent 3 · DL/UL 0/0 · split 5 · conn 2 <span class="dim">(binding TBD #13)</span>
+<span class="dim">Log:</span> 12:01:05 event onDownloadComplete → paper1.pdf · extract gated 1/3</div>
+</div>
+</div>
+
+<!-- ================= VARIANT C : sidebar nav ================= -->
+<div class="variant" id="vC">
+<h2>Variant C — sidebar nav (rail + content, wide modal add)</h2>
+<p class="cap">Left rail names all six screens with counts; content shows one. Queue is headers-only until expanded. Add is a wide modal with file list beside paste box (as in A).</p>
+
+<div class="screen">
+<div class="bar"> moon-down</div>
+<div class="cols" style="border-top:none">
+<div>▶ <span class="hi">Queue (4)</span>
+  Details
+  Add [+]
+  Accounts (2)
+  Settings
+  Log
+<span class="dim">1..6 or j/k + Enter</span></div>
+<div><span class="hi">▶ ubuntu-24.04-desktop.iso</span> <span class="b-dl">[DL]</span> 62% 8.4 MB/s
+▼ papers-batch <span class="b-err">[ERR]</span> 1/3
+  paper1 <span class="b-done">done</span> · paper2 <span class="b-err">ERR</span> · paper3 <span class="b-queued">queued</span>
+▶ debian-torrent <span class="b-paused">[HELD]</span> · ▶ old-archives <span class="b-gone">[GONE]</span>
+<span class="dim">children one-line when expanded; full detail on Details screen</span></div>
+</div>
+<div class="foot"> ↓ 8.4 MB/s ↑ 1.1 MB/s · active 2 · queued 3 · tick 1s · ? keys </div>
+</div>
+
+<div class="screen">
+<div class="bar"> Details (sidebar selection) — debian-torrent </div>
+<div class="body">package debian-torrent → ~/dl/moon/torrents · created 11:40 · members 1/1 · extract ON/subdir/keep
+└─ debian-12.iso (torrent) paused 31% 1.4/4.5 GB · handle &lt;engine id&gt; · source debian-12.iso.torrent
+<span class="dim">space resumes all members (fan-out — #7, no partial states in v1)</span></div>
+</div>
+
+<div class="screen">
+<div class="bar"> Accounts · Settings · Log (sidebar selections, same content zone) </div>
+<div class="body"><span class="dim">Accounts / Settings / Log render here with the same tables as A; rail keeps counts visible.</span></div>
+</div>
+</div>
+
+<div id="switcher"><button id="prev">◀</button> <span id="vlabel"></span> <button id="next">▶</button></div>
+
+<script>
+const names = {A:'A — inspector split', B:'B — full-screen tabs', C:'C — sidebar nav'};
+const order = ['A','B','C'];
+function cur(){ const m = new URLSearchParams(location.search).get('variant'); return names[m] ? m : 'A'; }
+function show(v){
+  order.forEach(k => document.getElementById('v'+k).classList.toggle('on', k===v));
+  document.getElementById('vlabel').textContent = v + ' (' + names[v] + ')';
+  const u = new URL(location.href); u.searchParams.set('variant', v); history.replaceState(null,'',u);
+}
+let v = cur(); show(v);
+document.getElementById('prev').onclick = () => { v = order[(order.indexOf(v)+2)%3]; show(v); };
+document.getElementById('next').onclick = () => { v = order[(order.indexOf(v)+1)%3]; show(v); };
+document.addEventListener('keydown', e => {
+  if (/INPUT|TEXTAREA/.test(document.activeElement.tagName)) return;
+  if (e.key === 'ArrowLeft') document.getElementById('prev').click();
+  if (e.key === 'ArrowRight') document.getElementById('next').click();
+  if (e.key === '?') { const h = document.getElementById('help'); h.style.display = h.style.display==='block'?'none':'block'; }
+});
+</script>
+</body>
+</html>
