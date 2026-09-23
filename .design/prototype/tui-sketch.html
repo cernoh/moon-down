@@ -29,27 +29,49 @@
     box-shadow:0 4px 18px rgba(0,0,0,.6); user-select:none; z-index:50; }
   #switcher button { background:none; border:none; color:#fff; font-size:16px; cursor:pointer; }
   #help { display:none; border:1px solid #d29922; padding:8px 10px; margin:12px 0; white-space:pre; }
+  table.keys { border-collapse:collapse; margin:6px 0 10px; font-size:12px; }
+  table.keys th, table.keys td { border:1px solid #30363d; padding:3px 8px; text-align:left; vertical-align:top; }
+  table.keys th { background:#161b22; color:#e6edf3; }
+  #keys { border:1px solid #d29922; padding:8px 10px; margin:12px 0; }
+  #keys h3 { margin:6px 0 4px; font-size:13px; color:#e6edf3; }
+  pre.diag { background:#161b22; border:1px solid #30363d; padding:6px 8px; overflow-x:auto; }
   .variant { display:none; } .variant.on { display:block; }
 </style>
 </head>
 <body>
 
 <div class="topnote">THROWAWAY sketch for <b>#10 TUI screens and keybindings</b> (branch <b>research/10-tui-sketch</b>).
-Flip variants with <b>?variant=A|B|C</b>, the bottom bar, or <b>←/→</b>. Press <b>?</b> for the proposed keybindings.
+Flip variants with <b>?variant=A|B|C</b>, the bottom bar, or <b>←/→</b>. All variants share the
+<b>render/update loop</b> and <b>keybindings table</b> below — judge those in Q4/Q2 even after picking a layout.
 Mock data follows the #7 verdict: one row per handle, worst-case header rollup, error text on children only.</div>
 
-<details class="loop">
+<details class="loop" open>
 <summary>Render/update loop (same under all variants — judge in Q4)</summary>
-key-event stream + 1s poll tick + completion-event fan-in → one mpsc channel → single event loop owns state →
-render-on-change only. Blocking work (extract per #11, account checks per #9) runs on <span class="dim">spawn_blocking</span>
-and posts back. Pattern: ratatui counter-async full-async <span class="dim">Tui</span>. Engine handle = GID or crate id (TBD by #13);
-"1s tick" is the poll interval, not a render timer.
+<pre class="diag">key events (crossterm EventStream) ──────────────────────┐
+1s poll tick (batched tell* + getGlobalStat over reqwest) ───┼──▶ mpsc channel ──▶ single event loop ──▶ render on change
+completion events (WS aria2.on* listener; crate callback if #13 switches engine) ─┘  (owns all state)         │
+extract / account-check I/O ──▶ spawn_blocking ──▶ posts result back as event ────────────────────────────────┘</pre>
+<p>Rules: the 1s tick is the <b>poll interval</b>, not a render timer — the screen redraws only when state
+changed (no idle flicker). The tick also reconciles missed completion events (#11 WS-first + poll fallback).
+Blocking work (extract per #11, account checks per #9) never runs on the event loop. Engine handle = GID today,
+crate id if #13 lands — the loop is unchanged either way. Pattern: ratatui counter-async full-async
+<span class="dim">Tui</span> (EventStream + <span class="dim">tokio::select!</span> + mpsc).</p>
 </details>
 
-<div id="help">Proposed keybindings (judge in Q2):
-  j/k or ↑/↓ move · h/l or ←/→ collapse/expand · Enter details · 1..6 jump screen · Tab next screen
-  a add dialog · space pause/resume (fan-out, per #7) · d remove (keep files) · D delete +files (confirm)
-  r retry / re-add · e retry extract (#11 ExtractFailed) · ? this help · q quit · Esc close dialog</div>
+<div id="keys">
+<h3>Keybindings per screen (same under all variants — judge in Q2; retry/remove rows judge in Q3)</h3>
+<table class="keys">
+<tr><th>Screen</th><th>Keys</th></tr>
+<tr><td>Global</td><td><b>1..6</b> jump screen · <b>Tab</b> next screen · <b>?</b> toggle this table · <b>q</b> quit · <b>Esc</b> close dialog / back</td></tr>
+<tr><td>Queue</td><td><b>j/k ↑/↓</b> move · <b>h/l ←/→ Enter</b> collapse/expand · <b>space</b> pause/resume whole package (fan-out, #7) · <b>d</b> remove (keep files) · <b>D</b> delete +files (confirmed) · <b>r</b> retry error / re-add gone (in place, #7) · <b>x</b> prune gone · <b>e</b> retry extract (#11 ExtractFailed)</td></tr>
+<tr><td>Add dialog</td><td><b>a</b> open · <b>Tab</b> move field · <b>Enter</b> submit = one package (#7) · <b>Esc</b> cancel</td></tr>
+<tr><td>Accounts</td><td><b>a</b> add · <b>t</b> test selected · <b>space</b> enable/disable (secret stays in OS keyring, #5)</td></tr>
+<tr><td>Settings</td><td><b>↑/↓</b> pick knob · <b>←/→</b> adjust · <b>Enter</b> apply (engine binding TBD by #13; global knobs only in v1)</td></tr>
+<tr><td>Details / Log</td><td><b>j/k</b> scroll · <b>Esc</b> back to Queue</td></tr>
+</table>
+<p class="cap">Retry/remove affordances (Q3) also appear inline on the rows themselves: error children show
+[r retry], gone children show [r re-add | x prune], headers carry the worst-case badge (#7 rollup).</p>
+</div>
 
 <!-- ================= VARIANT A : inspector split ================= -->
 <div class="variant" id="vA">
@@ -210,7 +232,7 @@ document.addEventListener('keydown', e => {
   if (/INPUT|TEXTAREA/.test(document.activeElement.tagName)) return;
   if (e.key === 'ArrowLeft') document.getElementById('prev').click();
   if (e.key === 'ArrowRight') document.getElementById('next').click();
-  if (e.key === '?') { const h = document.getElementById('help'); h.style.display = h.style.display==='block'?'none':'block'; }
+  if (e.key === '?') { const h = document.getElementById('keys'); h.style.display = h.style.display==='none'?'block':'none'; }
 });
 </script>
 </body>
