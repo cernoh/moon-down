@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::thread::{self, JoinHandle};
 
-use moon_down_core::extract::{discover_archives, extract_archive, ExtractError};
+use moon_down_core::extract::{discover_archives, extract_archive, extract_archive_in, ExtractError};
 use moon_down_core::queue::{ExtractStatus, Package};
 
 /// Where the trigger came from. Live feed is WS-first; poll is fallback.
@@ -32,11 +32,12 @@ pub fn spawn_extract_blocking(
     base_dest: PathBuf,
     stem_subdir: bool,
     keep_archives: bool,
+    search: Option<String>,
 ) -> JoinHandle<Result<(), ExtractError>> {
     thread::Builder::new()
         .name("extract-blocking".into())
         .spawn(move || {
-            let res = extract_many_blocking(&archives, &base_dest, stem_subdir);
+            let res = extract_many_blocking(&archives, &base_dest, stem_subdir, search.as_deref());
             if res.is_ok() && !keep_archives {
                 for a in &archives {
                     let _ = std::fs::remove_file(a);
@@ -48,7 +49,12 @@ pub fn spawn_extract_blocking(
         .expect("spawn extract-blocking")
 }
 
-fn extract_many_blocking(archives: &[PathBuf], base_dest: &Path, stem_subdir: bool) -> Result<(), ExtractError> {
+fn extract_many_blocking(
+    archives: &[PathBuf],
+    base_dest: &Path,
+    stem_subdir: bool,
+    search: Option<&str>,
+) -> Result<(), ExtractError> {
     for archive in archives {
         let dest = if stem_subdir {
             let stem = archive.file_stem().and_then(|s| s.to_str()).unwrap_or("extracted");
@@ -57,7 +63,10 @@ fn extract_many_blocking(archives: &[PathBuf], base_dest: &Path, stem_subdir: bo
         } else {
             base_dest.to_path_buf()
         };
-        extract_archive(archive, &dest)?;
+        match search {
+            Some(p) => extract_archive_in(archive, &dest, p)?,
+            None => extract_archive(archive, &dest)?,
+        }
     }
     // nested check after all: scan dest for archives produced
     // (individual extract_archive already checks, but post-scan covers 7z case)
@@ -70,6 +79,7 @@ fn extract_many_blocking(archives: &[PathBuf], base_dest: &Path, stem_subdir: bo
 pub fn trigger_if_ready(
     pkg: &mut Package,
     trigger: TriggerSource,
+    search: Option<String>,
 ) -> Option<(JoinHandle<Result<(), ExtractError>>, TriggerSource)> {
     if !is_ready(pkg) {
         return None;
@@ -85,16 +95,27 @@ pub fn trigger_if_ready(
     pkg.extract_error = None;
     let stem = pkg.extract_stem_subdir;
     let keep = pkg.keep_archives;
-    let h = spawn_extract_blocking(archives, base, stem, keep);
+    let h = spawn_extract_blocking(archives, base, stem, keep, search);
     Some((h, trigger))
 }
 
 /// Orchestrator that handles live-feed first, poll fallback, and manual retry.
 /// Tracks nothing else; readiness is derived from package state so failed packages are not auto-retied.
-pub struct ExtractOrchestrator;
+pub struct ExtractOrchestrator {
+    /// Explicit binary search path; `None` resolves 7z from PATH at spawn time.
+    search: Option<String>,
+}
 
 impl ExtractOrchestrator {
-    pub fn new() -> Self { Self }
+    pub fn new() -> Self {
+        Self { search: None }
+    }
+
+    /// Resolve 7z/7zz in `search` instead of PATH (tests, embedded hosts).
+    pub fn with_search_path(mut self, search: &str) -> Self {
+        self.search = Some(search.to_string());
+        self
+    }
 
     /// Called when live feed reports a package's members completed.
     /// Returns handle if extraction started.
@@ -102,7 +123,7 @@ impl ExtractOrchestrator {
         &self,
         pkg: &mut Package,
     ) -> Option<JoinHandle<Result<(), ExtractError>>> {
-        trigger_if_ready(pkg, TriggerSource::LiveFeed).map(|(h, _)| h)
+        trigger_if_ready(pkg, TriggerSource::LiveFeed, self.search.clone()).map(|(h, _)| h)
     }
 
     /// Timed poll fallback: scan all packages, start extraction for any ready ones that live feed missed.
@@ -112,7 +133,7 @@ impl ExtractOrchestrator {
     ) -> Vec<(u64, JoinHandle<Result<(), ExtractError>>)> {
         let mut handles = Vec::new();
         for pkg in &mut queue.packages {
-            if let Some((h, _)) = trigger_if_ready(pkg, TriggerSource::TimedPoll) {
+            if let Some((h, _)) = trigger_if_ready(pkg, TriggerSource::TimedPoll, self.search.clone()) {
                 let id = pkg.id;
                 handles.push((id, h));
             }
@@ -130,7 +151,7 @@ impl ExtractOrchestrator {
         }
         pkg.retry_extract();
         // now status is Idle, so trigger will see it as ready if complete
-        trigger_if_ready(pkg, TriggerSource::LiveFeed).map(|(h, _)| h)
+        trigger_if_ready(pkg, TriggerSource::LiveFeed, self.search.clone()).map(|(h, _)| h)
     }
 
     /// Apply outcome back to package (call after JoinHandle joins).
@@ -259,7 +280,7 @@ mod tests {
             zw.write_all(b"x").unwrap();
             zw.finish().unwrap();
         }
-        let h = spawn_extract_blocking(vec![zip_path], dir.path().to_path_buf(), false, true);
+        let h = spawn_extract_blocking(vec![zip_path], dir.path().to_path_buf(), false, true, None);
         // check thread name via handle? we set name to extract-blocking
         // join and check success
         let res = h.join().unwrap();
@@ -317,8 +338,6 @@ mod tests {
 
     #[test]
     fn missing_binary_reports_install_hint() {
-        let orig = std::env::var("PATH").unwrap_or_default();
-        std::env::set_var("PATH", "/nonexistent");
         let dir = tempfile::tempdir().unwrap();
         let rar = dir.path().join("a.rar");
         fs::write(&rar, b"dummy").unwrap();
@@ -329,7 +348,9 @@ mod tests {
         q.set_member_state(mid, MemberState::Complete);
         // move rar into target dir already there? discover will find it
         // but we need archive file already in dir: rar is there
-        let orch = ExtractOrchestrator::new();
+        // Explicit search path instead of mutating PATH, which would race sibling
+        // tests that spawn real binaries.
+        let orch = ExtractOrchestrator::new().with_search_path("/nonexistent");
         let h = orch.on_live_complete(&mut q.packages[0]).unwrap();
         let res = h.join().unwrap();
         ExtractOrchestrator::apply_outcome(&mut q.packages[0], res);
@@ -337,7 +358,6 @@ mod tests {
         let msg = q.packages[0].extract_error.clone().unwrap();
         assert!(msg.to_ascii_lowercase().contains("install"));
         assert!(msg.contains("7zz") || msg.contains("7z"));
-        std::env::set_var("PATH", orig);
     }
 
     #[test]

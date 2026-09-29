@@ -93,16 +93,34 @@ Default section order:
 5. Run existing verification when relevant
 6. Report any docs intentionally left unchanged and why
 
+## Verification
+
+- `cargo test` from the repo root covers all three crates (core, engine, ui)
+- `cargo` is not on the default PATH: run it as `nix shell nixpkgs#cargo nixpkgs#rustc -c cargo test`
+- Tests run in parallel by default. Tests must never mutate process-global state
+  (`std::env::set_var`, current dir) to force a condition: pass the value in
+  instead. Mutating `PATH` races sibling tests that spawn real binaries.
+- Branches use worktrunk (`wt switch --create <branch>`); never commit on `main`
+
 ## User Preferences
 
-When the user requests a durable behavior change, record it here or in the
-relevant child AGENTS.md
+- Merge finished work into `main` with `wt merge` once its tests pass
+- Nothing is pushed without being asked
 
 ## Child DOX Index
 
-- `crates/core/` — queue state: package/member model, worst-case rollup, byte-weighted progress, atomic persistence (.tmp+rename), stale→gone, retry handle-swap; verification: `cargo test -p moon-down-core`
-- `crates/engine/` — managed-local aria2c surface (re-exports core queue; engine lifecycle lands in #16)
-- `crates/ui/` — TUI surface (re-exports core queue; ratatui work lands in #17)
+- `crates/core/` — queue state, settings, accounts, extract logic: package/member
+  model, worst-case rollup, byte-weighted progress, atomic persistence
+  (.tmp+rename), stale→gone, retry handle-swap, per-host account records with
+  keyring-only secrets, plugin trait, nine global settings, archive extraction
+  (zip/tar in-Rust, 7z/rar via external binary); verification: `cargo test -p moon-down-core`
+- `crates/engine/` — managed-local aria2c child: spawn with ephemeral secret and
+  0600 conf, first free port in 6800-6899, state-dir lock, one batched poll tick,
+  enqueue with credential stripping, polite/forced/kill stop, single respawn,
+  extraction orchestration on blocking threads
+- `crates/ui/` — ratatui queue inspector: one event loop owning state, render on
+  state change only, queue always visible, keys 1-6/j/k/space/d/D/r/x/e/a, settings screen
 - Root workspace `Cargo.toml` owns member list and shared package version
 
-No child AGENTS.md yet — crates are thin scaffolds with single-file APIs; add child docs when engine/UI gain durable local contracts.
+No child AGENTS.md yet — crates are single-file modules with no durable local
+contracts of their own; add child docs when a crate gains its own workflow.
