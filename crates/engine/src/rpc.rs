@@ -38,11 +38,12 @@ impl StoredRecord {
 }
 
 pub fn build_enqueue(secret: &str, kind: EnqueueKind, rpc_id: u64) -> (Value, StoredRecord) {
+    // Never embed user:pass@ in URI on wire — always strip for both storage and send.
     let token = format!("token:{secret}");
     match kind {
         EnqueueKind::Uris(uris) => {
             let stripped: Vec<String> = uris.iter().map(|u| crate::strip::strip_credentials(u)).collect();
-            let req = json!({"jsonrpc":"2.0","id":rpc_id,"method":"aria2.addUri","params":[token, uris, {}]});
+            let req = json!({"jsonrpc":"2.0","id":rpc_id,"method":"aria2.addUri","params":[token, stripped.clone(), {}]});
             let rec = StoredRecord { kind: "uri".into(), uris: stripped, meta: None };
             (req, rec)
         }
@@ -55,6 +56,39 @@ pub fn build_enqueue(secret: &str, kind: EnqueueKind, rpc_id: u64) -> (Value, St
         EnqueueKind::Metalink(bytes) => {
             let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
             let req = json!({"jsonrpc":"2.0","id":rpc_id,"method":"aria2.addMetalink","params":[token, b64, {}]});
+            let rec = StoredRecord { kind: "metalink".into(), uris: vec![], meta: Some(format!("metalink:{}bytes", bytes.len())) };
+            (req, rec)
+        }
+    }
+}
+
+/// Build enqueue with credential options (http-user/http-passwd, never URI embedding).
+/// `auth_options` are injected as the `options` param for addUri/addTorrent/addMetalink.
+/// URIs are still stripped; secret lives only in the options map.
+pub fn build_enqueue_with_auth(
+    secret: &str,
+    kind: EnqueueKind,
+    rpc_id: u64,
+    auth_options: &std::collections::HashMap<String, String>,
+) -> (Value, StoredRecord) {
+    let token = format!("token:{secret}");
+    let opts = serde_json::to_value(auth_options).unwrap_or(json!({}));
+    match kind {
+        EnqueueKind::Uris(uris) => {
+            let stripped: Vec<String> = uris.iter().map(|u| crate::strip::strip_credentials(u)).collect();
+            let req = json!({"jsonrpc":"2.0","id":rpc_id,"method":"aria2.addUri","params":[token, stripped.clone(), opts]});
+            let rec = StoredRecord { kind: "uri".into(), uris: stripped, meta: None };
+            (req, rec)
+        }
+        EnqueueKind::Torrent(bytes) => {
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+            let req = json!({"jsonrpc":"2.0","id":rpc_id,"method":"aria2.addTorrent","params":[token, b64, [], opts]});
+            let rec = StoredRecord { kind: "torrent".into(), uris: vec![], meta: Some(format!("torrent:{}bytes", bytes.len())) };
+            (req, rec)
+        }
+        EnqueueKind::Metalink(bytes) => {
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+            let req = json!({"jsonrpc":"2.0","id":rpc_id,"method":"aria2.addMetalink","params":[token, b64, opts]});
             let rec = StoredRecord { kind: "metalink".into(), uris: vec![], meta: Some(format!("metalink:{}bytes", bytes.len())) };
             (req, rec)
         }
@@ -86,6 +120,10 @@ mod tests {
         assert_eq!(rec.uris, vec!["https://example.com/file.zip","https://example.com/a"]);
         assert!(!rec.contains_secret(secret));
         assert!(!rec.uris[0].contains("user:pass"));
+        // wire also stripped — never embed secret in URI
+        let wire_uris = req["params"][1].as_array().unwrap();
+        assert_eq!(wire_uris[0].as_str().unwrap(), "https://example.com/file.zip");
+        assert!(!wire_uris[0].as_str().unwrap().contains("user:pass"));
     }
     #[test]
     fn enqueue_torrent_base64() {
@@ -99,5 +137,21 @@ mod tests {
         let (req, rec) = build_enqueue("s", EnqueueKind::Metalink(b"hello".to_vec()), 1);
         assert_eq!(req["method"], "aria2.addMetalink");
         assert_eq!(rec.kind, "metalink");
+    }
+    #[test]
+    fn enqueue_with_auth_maps_to_http_opts_never_uri() {
+        let secret = "s3cr3t";
+        let mut opts = std::collections::HashMap::new();
+        opts.insert("http-user".into(), "alice".into());
+        opts.insert("http-passwd".into(), secret.into());
+        let uris = vec!["https://example.com/file".into()];
+        let (req, rec) = build_enqueue_with_auth(secret, EnqueueKind::Uris(uris), 42, &opts);
+        // options carry secret, URI does not
+        assert_eq!(req["params"][2]["http-user"], "alice");
+        assert_eq!(req["params"][2]["http-passwd"], secret);
+        let wire_uri = req["params"][1][0].as_str().unwrap();
+        assert!(!wire_uri.contains(secret));
+        assert!(!wire_uri.contains("@"));
+        assert!(!rec.contains_secret(secret));
     }
 }
