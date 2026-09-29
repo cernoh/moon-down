@@ -3,6 +3,7 @@ pub mod extract;
 pub mod persistence;
 pub mod plugin;
 pub mod queue;
+pub mod settings;
 
 pub use accounts::{
     delete_secret, inject_options, load_accounts, load_secret, save_accounts, service_name,

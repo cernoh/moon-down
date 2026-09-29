@@ -1,0 +1,258 @@
+use std::collections::HashMap;
+use std::path::Path;
+
+use moon_down_core::settings::{load_settings, save_settings, Settings};
+use moon_down_engine::Engine;
+use serde_json::Value;
+
+/// Settings screen: shows all nine, edits apply instantly via one changeGlobalOption, no restart.
+/// Handles limit units, empty=unlimited, clamping hints, and empty-dir rejection.
+pub struct SettingsScreen {
+    pub settings: Settings,
+    /// per-field hint (clamp messages)
+    pub hints: HashMap<String, String>,
+    /// last error (e.g., empty dir)
+    pub error: Option<String>,
+    config_path: std::path::PathBuf,
+}
+
+impl SettingsScreen {
+    pub fn new(config_path: &Path, state_dir: &Path) -> Self {
+        let settings = load_settings(config_path, state_dir).unwrap_or_else(|_| Settings::default_for(state_dir));
+        Self {
+            settings,
+            hints: HashMap::new(),
+            error: None,
+            config_path: config_path.to_path_buf(),
+        }
+    }
+
+    /// All nine fields in display order.
+    pub fn fields(&self) -> Vec<(&'static str, String)> {
+        vec![
+            ("max_concurrent_downloads", self.settings.max_concurrent_downloads.to_string()),
+            ("download_limit", match self.settings.max_overall_download_limit {
+                None => String::new(),
+                Some(v) => moon_down_core::settings::format_bytes(v),
+            }),
+            ("upload_limit", match self.settings.max_overall_upload_limit {
+                None => String::new(),
+                Some(v) => moon_down_core::settings::format_bytes(v),
+            }),
+            ("split", self.settings.split.to_string()),
+            ("connections_per_server", self.settings.max_connection_per_server.to_string()),
+            ("min_split_size", moon_down_core::settings::format_bytes(self.settings.min_split_size)),
+            ("dir", self.settings.dir.display().to_string()),
+            ("max_tries", self.settings.max_tries.to_string()),
+            ("retry_wait", self.settings.retry_wait.to_string()),
+        ]
+    }
+
+    fn persist(&self) {
+        let _ = save_settings(&self.settings, &self.config_path);
+    }
+
+    /// Apply one field through Engine live — returns single RPC Value.
+    fn apply_one(&self, engine: &Engine, field: &str, id: u64) -> Value {
+        let (k, v) = self.settings.wire_pair(field);
+        engine.change_global_option(&k, &v, id)
+    }
+
+    pub fn set_concurrent(&mut self, engine: &Engine, raw: i64, id: u64) -> Value {
+        self.error = None;
+        if let Some(h) = self.settings.set_max_concurrent_downloads(raw) {
+            self.hints.insert("max_concurrent_downloads".into(), h);
+        } else {
+            self.hints.remove("max_concurrent_downloads");
+        }
+        self.persist();
+        self.apply_one(engine, "max_concurrent_downloads", id)
+    }
+
+    pub fn set_download_limit(&mut self, engine: &Engine, raw: &str, id: u64) -> Result<Value, String> {
+        self.error = None;
+        self.settings.set_download_limit_str(raw).map_err(|e| e.clone())?;
+        self.hints.remove("download_limit");
+        self.persist();
+        Ok(self.apply_one(engine, "download_limit", id))
+    }
+
+    pub fn set_upload_limit(&mut self, engine: &Engine, raw: &str, id: u64) -> Result<Value, String> {
+        self.error = None;
+        self.settings.set_upload_limit_str(raw).map_err(|e| e.clone())?;
+        self.hints.remove("upload_limit");
+        self.persist();
+        Ok(self.apply_one(engine, "upload_limit", id))
+    }
+
+    pub fn set_split(&mut self, engine: &Engine, raw: i64, id: u64) -> Value {
+        self.error = None;
+        if let Some(h) = self.settings.set_split(raw) {
+            self.hints.insert("split".into(), h);
+        } else {
+            self.hints.remove("split");
+        }
+        self.persist();
+        self.apply_one(engine, "split", id)
+    }
+
+    pub fn set_connections(&mut self, engine: &Engine, raw: i64, id: u64) -> Value {
+        self.error = None;
+        if let Some(h) = self.settings.set_max_connection_per_server(raw) {
+            self.hints.insert("connections_per_server".into(), h);
+        } else {
+            self.hints.remove("connections_per_server");
+        }
+        self.persist();
+        self.apply_one(engine, "connections_per_server", id)
+    }
+
+    pub fn set_min_split(&mut self, engine: &Engine, raw: &str, id: u64) -> Result<Value, String> {
+        self.error = None;
+        match self.settings.set_min_split_size_str(raw) {
+            Ok(hint) => {
+                if let Some(h) = hint {
+                    self.hints.insert("min_split_size".into(), h);
+                } else {
+                    self.hints.remove("min_split_size");
+                }
+                self.persist();
+                Ok(self.apply_one(engine, "min_split_size", id))
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn set_dir(&mut self, engine: &Engine, raw: &str, id: u64) -> Result<Value, String> {
+        match self.settings.set_dir(raw) {
+            Ok(()) => {
+                self.error = None;
+                self.hints.remove("dir");
+                self.persist();
+                Ok(self.apply_one(engine, "dir", id))
+            }
+            Err(e) => {
+                self.error = Some(e.clone());
+                Err(e)
+            }
+        }
+    }
+
+    pub fn set_retries(&mut self, engine: &Engine, raw: i64, id: u64) -> Value {
+        self.error = None;
+        if let Some(h) = self.settings.set_max_tries(raw) {
+            self.hints.insert("max_tries".into(), h);
+        } else {
+            self.hints.remove("max_tries");
+        }
+        self.persist();
+        self.apply_one(engine, "max_tries", id)
+    }
+
+    pub fn set_retry_wait(&mut self, engine: &Engine, raw: i64, id: u64) -> Value {
+        self.error = None;
+        if let Some(h) = self.settings.set_retry_wait(raw) {
+            self.hints.insert("retry_wait".into(), h);
+        } else {
+            self.hints.remove("retry_wait");
+        }
+        self.persist();
+        self.apply_one(engine, "retry_wait", id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use moon_down_engine::engine::StartOptions;
+    use tempfile::tempdir;
+
+    fn engine_and_screen() -> (Engine, SettingsScreen, tempfile::TempDir) {
+        let dir = tempdir().unwrap();
+        let state_dir = dir.path().join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let eng = Engine::start(&state_dir, StartOptions { aria_bin: Some("sleep".into()), mock_sleep_secs: Some(60) }).unwrap();
+        let cfg = dir.path().join("settings.json");
+        let screen = SettingsScreen::new(&cfg, &state_dir);
+        (eng, screen, dir)
+    }
+
+    #[test]
+    fn screen_shows_all_nine_defaults() {
+        let (_eng, scr, _dir) = engine_and_screen();
+        assert_eq!(scr.fields().len(), 9);
+        let map: HashMap<_, _> = scr.fields().into_iter().collect();
+        assert_eq!(map["max_concurrent_downloads"], "5");
+        assert_eq!(map["download_limit"], ""); // unlimited => empty input
+        assert_eq!(map["upload_limit"], "");
+        assert_eq!(map["split"], "5");
+        assert_eq!(map["connections_per_server"], "1");
+        assert_eq!(map["min_split_size"], "20M");
+        assert_eq!(map["max_tries"], "5");
+        assert_eq!(map["retry_wait"], "0");
+    }
+
+    #[test]
+    fn change_applies_at_once_with_no_restart_single_rpc() {
+        let (eng, mut scr, _dir) = engine_and_screen();
+        let v = scr.set_concurrent(&eng, 10, 1);
+        assert_eq!(v["method"], "aria2.changeGlobalOption");
+        assert_eq!(v["params"][1]["max-concurrent-downloads"], "10");
+        assert_eq!(v["params"][1].as_object().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn limit_accepts_number_with_unit_empty_means_unlimited() {
+        let (eng, mut scr, _dir) = engine_and_screen();
+        let v = scr.set_download_limit(&eng, "500K", 1).unwrap();
+        assert_eq!(v["params"][1]["max-overall-download-limit"], (500 * 1024).to_string());
+        let v2 = scr.set_download_limit(&eng, "", 2).unwrap();
+        assert_eq!(v2["params"][1]["max-overall-download-limit"], "0");
+    }
+
+    #[test]
+    fn numeric_clamps_and_shows_hint() {
+        let (eng, mut scr, _dir) = engine_and_screen();
+        let _ = scr.set_concurrent(&eng, 999, 1);
+        assert!(scr.hints.contains_key("max_concurrent_downloads"));
+        assert!(scr.hints["max_concurrent_downloads"].contains("clamped"));
+    }
+
+    #[test]
+    fn empty_dir_fails_and_keeps_old() {
+        let (eng, mut scr, _dir) = engine_and_screen();
+        let old = scr.settings.dir.clone();
+        let err = scr.set_dir(&eng, "", 1).unwrap_err();
+        assert!(err.contains("must not be empty"));
+        assert_eq!(scr.settings.dir, old);
+        assert!(scr.error.is_some());
+        // valid
+        scr.set_dir(&eng, "/tmp/x", 2).unwrap();
+        assert_eq!(scr.settings.dir.display().to_string(), "/tmp/x");
+    }
+
+    #[test]
+    fn first_run_merges_saved_over_defaults() {
+        let dir = tempdir().unwrap();
+        let state_dir = dir.path().join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let cfg = dir.path().join("settings.json");
+        // first run: no file
+        let s1 = SettingsScreen::new(&cfg, &state_dir);
+        assert_eq!(s1.settings.max_concurrent_downloads, 5);
+        // change via screen persists
+        let eng = Engine::start(&state_dir, StartOptions { aria_bin: Some("sleep".into()), mock_sleep_secs: Some(60) }).unwrap();
+        // need fresh state_dir lock: drop s1 eng? Use separate dir
+        drop(s1);
+        drop(eng);
+        // second instance with saved value
+        let mut settings = moon_down_core::settings::Settings::default_for(&state_dir);
+        settings.max_concurrent_downloads = 12;
+        moon_down_core::settings::save_settings(&settings, &cfg).unwrap();
+        // Need to free lock — engine already dropped; create new screen
+        let s2 = SettingsScreen::new(&cfg, &state_dir);
+        assert_eq!(s2.settings.max_concurrent_downloads, 12);
+        // dir default preserved
+        assert_eq!(s2.settings.dir, state_dir);
+    }
+}

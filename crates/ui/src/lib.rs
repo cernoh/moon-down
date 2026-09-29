@@ -1,9 +1,11 @@
-//! UI crate — queue inspector skeleton with ratatui.
+//! UI crate — queue inspector skeleton with ratatui, plus the settings screen.
 //! One event loop owns App; render only on state change.
 
 pub mod app;
 pub mod render;
+pub mod settings_screen;
 
 pub use app::{App, View};
 pub use moon_down_core::{MemberState, PackageStatus, Queue};
 pub use render::{render, render_to_string};
+pub use settings_screen::SettingsScreen;

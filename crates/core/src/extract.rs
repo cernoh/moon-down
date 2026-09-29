@@ -68,16 +68,25 @@ pub fn is_archive_path(path: &Path) -> bool {
 
 /// Find 7zz first, then 7z in PATH. Returns binary name to invoke.
 pub fn find_7z_binary() -> Option<String> {
+    find_7z_binary_in(&env_search_path())
+}
+
+/// Same lookup against an explicit colon-separated search path.
+pub fn find_7z_binary_in(search: &str) -> Option<String> {
     for bin in ["7zz", "7z"] {
-        if is_binary_in_path(bin) {
+        if is_binary_in_path(bin, search) {
             return Some(bin.to_string());
         }
     }
     None
 }
 
-fn is_binary_in_path(bin: &str) -> bool {
-    if let Ok(path) = std::env::var("PATH") {
+fn env_search_path() -> String {
+    std::env::var("PATH").unwrap_or_default()
+}
+
+fn is_binary_in_path(bin: &str, path: &str) -> bool {
+    {
         for dir in path.split(':') {
             let p = Path::new(dir).join(bin);
             if p.is_file() {
@@ -132,13 +141,23 @@ fn dest_for_archive(archive: &Path, base_dest: &Path, stem_subdir: bool) -> Path
 /// Extract a single archive to dest. No shell call for zip/tar family.
 /// 7z/rar delegate to 7zz/7z binary.
 pub fn extract_archive(archive: &Path, dest: &Path) -> Result<(), ExtractError> {
+    extract_archive_in(archive, dest, &env_search_path())
+}
+
+/// Same as `extract_archive` with an explicit binary search path (used by tests and
+/// by callers that resolve 7z themselves).
+pub fn extract_archive_in(
+    archive: &Path,
+    dest: &Path,
+    search: &str,
+) -> Result<(), ExtractError> {
     let kind = detect_kind(archive);
     match kind {
         ArchiveKind::Zip => extract_zip(archive, dest),
         ArchiveKind::Tar | ArchiveKind::TarGz | ArchiveKind::TarBz2 | ArchiveKind::TarXz => {
             extract_tar_family(archive, dest, kind)
         }
-        ArchiveKind::SevenZ | ArchiveKind::Rar => extract_via_7z(archive, dest),
+        ArchiveKind::SevenZ | ArchiveKind::Rar => extract_via_7z_in(archive, dest, search),
         ArchiveKind::Unknown => Err(ExtractError::Unsupported(format!(
             "unsupported archive type: {}",
             archive.display()
@@ -292,8 +311,13 @@ fn do_tar_extract<R: std::io::Read>(reader: R, dest: &Path, archive: &Path) -> R
     Ok(())
 }
 
+#[allow(dead_code)]
 fn extract_via_7z(archive: &Path, dest: &Path) -> Result<(), ExtractError> {
-    let bin = find_7z_binary().ok_or_else(|| {
+    extract_via_7z_in(archive, dest, &env_search_path())
+}
+
+fn extract_via_7z_in(archive: &Path, dest: &Path, search: &str) -> Result<(), ExtractError> {
+    let bin = find_7z_binary_in(search).ok_or_else(|| {
         ExtractError::MissingBinary(
             "7z/rar extraction requires 7zz or 7z (p7zip) — install p7zip-full or 7zip and ensure 7zz or 7z is in PATH".into(),
         )
@@ -506,18 +530,16 @@ mod tests {
 
     #[test]
     fn missing_binary_hint() {
-        // Force missing by clearing PATH
-        let orig = std::env::var("PATH").unwrap_or_default();
-        std::env::set_var("PATH", "/nonexistent");
+        // Force missing with an explicit search path: mutating PATH here would
+        // race sibling tests that spawn real binaries.
         let dir = tempfile::tempdir().unwrap();
         let rar_path = dir.path().join("a.rar");
         fs::write(&rar_path, b"dummy").unwrap();
         let dest = dir.path().join("out");
-        let err = extract_archive(&rar_path, &dest).unwrap_err();
+        let err = extract_via_7z_in(&rar_path, &dest, "/nonexistent").unwrap_err();
         assert!(matches!(err, ExtractError::MissingBinary(_)));
         assert!(err.to_string().contains("7zz") || err.to_string().contains("7z"));
         assert!(err.to_string().to_ascii_lowercase().contains("install"));
-        std::env::set_var("PATH", orig);
     }
 
     #[test]

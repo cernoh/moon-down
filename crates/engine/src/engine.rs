@@ -131,6 +131,11 @@ impl Engine {
         build_poll_batch(&self.secret, id)
     }
 
+    /// Live-apply one global option with no restart. Each change is one RPC call.
+    pub fn change_global_option(&self, key: &str, value: &str, id: u64) -> Value {
+        crate::rpc::build_change_global_option(&self.secret, key, value, id)
+    }
+
     pub fn prepare_enqueue(&self, kind: EnqueueKind, id: u64) -> (Value, StoredRecord) {
         build_enqueue(&self.secret, kind, id)
     }
