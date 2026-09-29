@@ -7,5 +7,10 @@ description = "TUI crate for moon-down"
 
 [dependencies]
 moon-down-core = { path = "../core" }
+moon-down-engine = { path = "../engine" }
 ratatui = "0.29"
 crossterm = "0.28"
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"

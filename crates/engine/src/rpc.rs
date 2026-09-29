@@ -1,6 +1,12 @@
 use base64::Engine as _;
 use serde_json::{json, Value};
 
+/// Build a single global-option change: one option at once, live applied with no restart.
+pub fn build_change_global_option(secret: &str, key: &str, value: &str, rpc_id: u64) -> Value {
+    let token = format!("token:{secret}");
+    json!({"jsonrpc":"2.0","id":rpc_id,"method":"aria2.changeGlobalOption","params":[token, {key: value}]})
+}
+
 /// Build a single JSON-RPC batch for one tick: active + queued + past + global stat, with auth.
 /// All calls carry `token:SECRET` as first param except Methods that are not exempt — in our
 /// subset none are exempt, so every call is authenticated.
@@ -153,5 +159,16 @@ mod tests {
         assert!(!wire_uri.contains(secret));
         assert!(!wire_uri.contains("@"));
         assert!(!rec.contains_secret(secret));
+    }
+
+    #[test]
+    fn change_global_option_is_one_call_with_no_restart() {
+        let v = build_change_global_option("s3cr3t", "max-concurrent-downloads", "10", 42);
+        assert_eq!(v["method"], "aria2.changeGlobalOption");
+        assert_eq!(v["id"], 42);
+        assert_eq!(v["params"][0], "token:s3cr3t");
+        assert_eq!(v["params"][1]["max-concurrent-downloads"], "10");
+        // single option per call
+        assert_eq!(v["params"][1].as_object().unwrap().len(), 1);
     }
 }
