@@ -12,6 +12,7 @@ serde_json = "1"
 base64 = "0.22"
 rand = "0.8"
 fs2 = "0.4"
+ureq = { version = "2", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"

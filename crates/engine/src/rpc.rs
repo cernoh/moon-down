@@ -1,5 +1,8 @@
 use base64::Engine as _;
+use serde::Deserialize;
 use serde_json::{json, Value};
+
+use moon_down_core::MemberState;
 
 /// Build a single global-option change: one option at once, live applied with no restart.
 pub fn build_change_global_option(secret: &str, key: &str, value: &str, rpc_id: u64) -> Value {
@@ -101,9 +104,262 @@ pub fn build_enqueue_with_auth(
     }
 }
 
+/// One download as the daemon reports it. Only the keys our batch asks for.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct StatusEntry {
+    #[serde(default)]
+    pub gid: String,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    #[serde(rename = "totalLength")]
+    pub total_length: String,
+    #[serde(default)]
+    #[serde(rename = "completedLength")]
+    pub completed_length: String,
+    #[serde(default)]
+    #[serde(rename = "downloadSpeed")]
+    pub download_speed: String,
+    #[serde(rename = "errorMessage", default)]
+    pub error_message: String,
+    #[serde(default)]
+    pub dir: String,
+    #[serde(default)]
+    pub files: Vec<FileEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct FileEntry {
+    #[serde(default)]
+    pub path: String,
+    #[serde(rename = "uris", default)]
+    pub uris: Vec<UriEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct UriEntry {
+    #[serde(default)]
+    pub uri: String,
+}
+
+impl StatusEntry {
+    pub fn total(&self) -> u64 {
+        self.total_length.parse().unwrap_or(0)
+    }
+    pub fn completed(&self) -> u64 {
+        self.completed_length.parse().unwrap_or(0)
+    }
+    pub fn speed(&self) -> u64 {
+        self.download_speed.parse().unwrap_or(0)
+    }
+    /// Best available name: the first file's basename, else the first URI's tail.
+    pub fn display_name(&self) -> String {
+        if let Some(f) = self.files.first() {
+            let p = &f.path;
+            let name = p.rsplit('/').next().unwrap_or(p);
+            if !name.is_empty() {
+                return name.to_string();
+            }
+        }
+        if let Some(u) = self.files.first().and_then(|f| f.uris.first()).map(|u| u.uri.clone()) {
+            let tail = u.split(['?', '#']).next().unwrap_or(&u);
+            let name = tail.rsplit('/').next().unwrap_or(tail);
+            if !name.is_empty() {
+                return name.to_string();
+            }
+        }
+        self.gid.chars().take(8).collect()
+    }
+    /// aria2 status -> our canonical member state. Anything unexpected is an error
+    /// rather than a guess, so a row never looks healthy when the daemon is not.
+    pub fn member_state(&self) -> MemberState {
+        match self.status.as_str() {
+            "active" => MemberState::Downloading,
+            "waiting" => MemberState::Queued,
+            "paused" => MemberState::Paused,
+            "complete" => MemberState::Complete,
+            "error" | "removed" => MemberState::Error,
+            other => {
+                let _ = other;
+                MemberState::Queued
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
+pub struct GlobalStat {
+    #[serde(default, rename = "downloadSpeed")]
+    pub download_speed: String,
+    #[serde(default, rename = "numActive")]
+    pub num_active: String,
+    #[serde(default, rename = "numWaiting")]
+    pub num_waiting: String,
+    #[serde(default, rename = "numStopped")]
+    pub num_stopped: String,
+}
+
+impl GlobalStat {
+    pub fn speed(&self) -> u64 {
+        self.download_speed.parse().unwrap_or(0)
+    }
+    pub fn active(&self) -> u64 {
+        self.num_active.parse().unwrap_or(0)
+    }
+    pub fn waiting(&self) -> u64 {
+        self.num_waiting.parse().unwrap_or(0)
+    }
+    pub fn stopped(&self) -> u64 {
+        self.num_stopped.parse().unwrap_or(0)
+    }
+}
+
+/// One parsed tick: the four batch replies, in request order.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Tick {
+    pub active: Vec<StatusEntry>,
+    pub waiting: Vec<StatusEntry>,
+    pub stopped: Vec<StatusEntry>,
+    pub global: GlobalStat,
+}
+
+impl Tick {
+    pub fn all(&self) -> impl Iterator<Item = &StatusEntry> {
+        self.active.iter().chain(self.waiting.iter()).chain(self.stopped.iter())
+    }
+
+    /// Parse a batch reply. Entries come back in request order, so position tells
+    /// us which call answered; a short or reordered batch is an error, never a
+    /// partial queue update.
+    pub fn from_batch(reply: &serde_json::Value) -> Result<Tick, String> {
+        let items = reply
+            .as_array()
+            .ok_or_else(|| "batch reply was not an array".to_string())?;
+        if items.len() < 4 {
+            return Err(format!("batch reply had {} entries, expected 4", items.len()));
+        }
+        let entry = |i: usize| -> Result<Vec<StatusEntry>, String> {
+            let result = items[i]
+                .get("result")
+                .ok_or_else(|| format!("entry {i} had no result"))?;
+            serde_json::from_value(result.clone())
+                .map_err(|e| format!("entry {i} did not parse: {e}"))
+        };
+        let global = items[3]
+            .get("result")
+            .ok_or_else(|| "global stat had no result".to_string())
+            .and_then(|r| {
+                serde_json::from_value::<GlobalStat>(r.clone())
+                    .map_err(|e| format!("global stat did not parse: {e}"))
+            })?;
+        Ok(Tick {
+            active: entry(0)?,
+            waiting: entry(1)?,
+            stopped: entry(2)?,
+            global,
+        })
+    }
+
+    /// Fold one tick into the queue. Handles the daemon does not know about stay
+    /// untouched; handles it forgot become gone rows rather than disappearing.
+    pub fn apply(&self, queue: &mut moon_down_core::Queue) {
+        let live: Vec<String> = self.all().map(|e| e.gid.clone()).collect();
+
+        for e in self.all() {
+            let Some(mid) = queue.member_id_by_handle(&e.gid) else {
+                continue; // a download we did not add (e.g. a session resume)
+            };
+            queue.set_member_progress(mid, e.total(), e.completed());
+            let next = e.member_state();
+            // A terminal row stays terminal until the user acts; core enforces that.
+            queue.set_member_state(mid, next.clone());
+            if next == MemberState::Error && !e.error_message.is_empty() {
+                queue.set_member_error(mid, e.error_message.clone());
+            }
+        }
+        queue.reconcile(&live);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn sample_batch() -> serde_json::Value {
+        serde_json::json!([
+            {"jsonrpc":"2.0","id":1,"result":[
+                {"gid":"g1","status":"active","totalLength":"1000","completedLength":"250",
+                 "downloadSpeed":"500","files":[{"path":"/tmp/a.iso","uris":[{"uri":"https://x/a.iso"}]}]}
+            ]},
+            {"jsonrpc":"2.0","id":2,"result":[
+                {"gid":"g2","status":"waiting","totalLength":"10","completedLength":"0","downloadSpeed":"0"}
+            ]},
+            {"jsonrpc":"2.0","id":3,"result":[
+                {"gid":"g3","status":"complete","totalLength":"20","completedLength":"20","downloadSpeed":"0"}
+            ]},
+            {"jsonrpc":"2.0","id":4,"result":
+                {"downloadSpeed":"500","numActive":"1","numWaiting":"1","numStopped":"1"}}
+        ])
+    }
+
+    #[test]
+    fn tick_parses_all_four_entries() {
+        let t = Tick::from_batch(&sample_batch()).unwrap();
+        assert_eq!(t.active.len(), 1);
+        assert_eq!(t.waiting.len(), 1);
+        assert_eq!(t.stopped.len(), 1);
+        assert_eq!(t.global.active(), 1);
+        assert_eq!(t.global.speed(), 500);
+        assert_eq!(t.all().count(), 3);
+    }
+
+    #[test]
+    fn status_maps_to_member_state() {
+        let t = Tick::from_batch(&sample_batch()).unwrap();
+        assert_eq!(t.active[0].member_state(), MemberState::Downloading);
+        assert_eq!(t.waiting[0].member_state(), MemberState::Queued);
+        assert_eq!(t.stopped[0].member_state(), MemberState::Complete);
+        assert_eq!(t.active[0].completed(), 250);
+        assert_eq!(t.active[0].total(), 1000);
+        assert_eq!(t.active[0].speed(), 500);
+    }
+
+    #[test]
+    fn display_name_prefers_file_then_uri() {
+        let t = Tick::from_batch(&sample_batch()).unwrap();
+        assert_eq!(t.active[0].display_name(), "a.iso");
+        // no files: fall back to the gid prefix
+        assert_eq!(t.waiting[0].display_name(), "g2");
+    }
+
+    #[test]
+    fn short_batch_is_an_error_not_a_partial_update() {
+        let short = serde_json::json!([{"jsonrpc":"2.0","id":1,"result":[]}]);
+        assert!(Tick::from_batch(&short).is_err());
+        assert!(Tick::from_batch(&serde_json::json!({})).is_err());
+    }
+
+    #[test]
+    fn apply_updates_state_and_marks_vanished_gone() {
+        let mut q = moon_down_core::Queue::new();
+        let pkg = q.add_package("p", "/tmp", vec![("a".into(), "https://x/a".into())]);
+        let mid = q.packages[0].members[0].id;
+        q.set_member_handle(mid, "g1".into());
+        let gone = q.packages[0].members[0].id;
+        let _ = pkg;
+        // second member the engine has never heard of
+        q.add_package("q", "/tmp", vec![("b".into(), "https://x/b".into())]);
+        let mid2 = q.packages[1].members[0].id;
+        q.set_member_handle(mid2, "ghost".into());
+        let _ = gone;
+
+        Tick::from_batch(&sample_batch()).unwrap().apply(&mut q);
+
+        assert_eq!(q.find_member(mid).unwrap().state, MemberState::Downloading);
+        assert_eq!(q.find_member(mid).unwrap().completed_bytes, 250);
+        assert_eq!(q.find_member(mid).unwrap().total_bytes, 1000);
+        assert_eq!(q.find_member(mid2).unwrap().state, MemberState::Gone);
+    }
+
     #[test]
     fn poll_batch_has_four_calls_with_auth() {
         let v = build_poll_batch("s3cr3t", 1);

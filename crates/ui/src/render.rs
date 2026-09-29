@@ -31,25 +31,116 @@ fn member_state_label(s: &MemberState) -> &'static str {
 }
 
 pub fn render(app: &App, frame: &mut Frame) {
+    render_with(app, frame, "", false)
+}
+
+/// Row heights and the accent colour, all derived from the design seed (see `main.rs`).
+/// Keeping them here means tests and the binary agree on the geometry.
+pub const DETAIL_ROWS: u16 = 6;
+pub const LOG_ROWS: u16 = 5;
+pub const HISTORY_ROWS: u16 = 7;
+pub const ACCENT: Color = Color::Rgb(214, 69, 217);
+
+/// Full render with an optional one-line status bar and a history pane of
+/// already-completed packages. `status` empty and `show_history` false gives the
+/// plain three-pane layout.
+pub fn render_with(app: &App, frame: &mut Frame, status: &str, show_history: bool) {
     let area = frame.area();
 
-    // Layout: top pane (queue/accounts/settings) + detail + log
-    // Always reserve detail and log beneath queue.
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(8),    // top pane (queue/accounts/settings) — always visible queue data
-            Constraint::Length(7), // detail view
-            Constraint::Length(6), // log tail
-        ])
-        .split(area);
+    let mut constraints = vec![Constraint::Min(8)]; // top pane: queue always visible
+    if !status.is_empty() {
+        constraints.push(Constraint::Length(1));
+    }
+    constraints.push(Constraint::Length(DETAIL_ROWS));
+    if show_history {
+        constraints.push(Constraint::Length(HISTORY_ROWS));
+    }
+    constraints.push(Constraint::Length(LOG_ROWS));
 
-    render_top(app, frame, chunks[0]);
-    render_detail(app, frame, chunks[1]);
-    render_log(app, frame, chunks[2]);
+    let mut sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
+        .split(area)
+        .to_vec();
+
+    let mut idx = 0;
+    let top = sections[idx];
+    idx += 1;
+    if !status.is_empty() {
+        render_status(frame, sections[idx], status);
+        idx += 1;
+    }
+    let detail = sections[idx];
+    idx += 1;
+    if show_history {
+        render_history(app, frame, sections[idx]);
+        idx += 1;
+    }
+    let log = sections[idx];
+
+    render_top(app, frame, top);
+    render_detail(app, frame, detail);
+    render_log(app, frame, log);
 
     if app.show_add_modal {
-        render_add_modal(frame, area);
+        render_add_modal(frame, area, &app.add_input);
+    }
+}
+
+fn render_status(frame: &mut Frame, area: Rect, status: &str) {
+    let line = Line::from(vec![
+        Span::styled(" moon-down ", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+        Span::styled(status, Style::default().fg(Color::Gray)),
+    ]);
+    frame.render_widget(Paragraph::new(line).style(Style::default().bg(Color::Black)), area);
+}
+
+/// Everything already finished, so previously-downloaded work stays visible.
+fn render_history(app: &App, frame: &mut Frame, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" History — already downloaded ");
+
+    let done: Vec<&moon_down_core::Package> = app
+        .queue
+        .packages
+        .iter()
+        .filter(|p| p.status() == PackageStatus::Complete)
+        .collect();
+
+    if done.is_empty() {
+        frame.render_widget(
+            Paragraph::new("(nothing completed yet)").block(block),
+            area,
+        );
+        return;
+    }
+
+    let lines: Vec<Line> = done
+        .iter()
+        .map(|p| {
+            let bytes: u64 = p.members.iter().map(|m| m.total_bytes).sum();
+            Line::from(Span::styled(
+                format!(" ✓ {}  {}  {} member(s)", p.name, human_bytes(bytes), p.members.len()),
+                Style::default().fg(ACCENT),
+            ))
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+pub fn human_bytes(n: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KiB", "MiB", "GiB"];
+    let mut v = n as f64;
+    let mut u = 0;
+    while v >= 1024.0 && u + 1 < UNITS.len() {
+        v /= 1024.0;
+        u += 1;
+    }
+    if u == 0 {
+        format!("{n} B")
+    } else {
+        format!("{v:.1} {}", UNITS[u])
     }
 }
 
@@ -61,7 +152,7 @@ fn render_top(app: &App, frame: &mut Frame, area: Rect) {
         View::Accounts => " Accounts [3] — Queue below ",
         View::Settings => " Settings [4] — Queue below ",
         View::Log => " Queue — Log focus [5] ",
-        View::Help => " Help [6] ",
+        View::Help => " Help [6] — vim: j/k gg/G Ctrl-D/U Ctrl-F/B arrows/hjkl ",
     };
     let block = Block::default().borders(Borders::ALL).title(title);
 
@@ -203,29 +294,28 @@ fn render_log(app: &App, frame: &mut Frame, area: Rect) {
     frame.render_widget(para, area);
 }
 
-fn render_add_modal(frame: &mut Frame, area: Rect) {
-    let modal_w = 60.min(area.width.saturating_sub(4));
-    let modal_h = 14.min(area.height.saturating_sub(4));
+fn render_add_modal(frame: &mut Frame, area: Rect, input: &str) {
+    let modal_w = 66.min(area.width.saturating_sub(4));
+    let modal_h = 12.min(area.height.saturating_sub(4));
     let x = (area.width - modal_w) / 2;
     let y = (area.height - modal_h) / 2;
     let modal_area = Rect::new(x, y, modal_w, modal_h);
     frame.render_widget(Clear, modal_area);
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Add downloads (Esc to close, Enter to submit) ")
+        .title(" Add — paste URIs, Enter to enqueue, Esc to close ")
         .style(Style::default().bg(Color::Black).fg(Color::White));
+    let input_line = if input.is_empty() { "(type a URI — e.g. https://example.com/a.iso or file:///tmp/a)" } else { input };
     let content = Paragraph::new(vec![
-        Line::from(" URIs / magnets (one per line):"),
-        Line::from(" ┌─────────────────────────────────┐"),
-        Line::from(" │                                 │"),
-        Line::from(" └─────────────────────────────────┘"),
-        Line::from(" Target dir: [                    ]"),
-        Line::from(" [x] extract  [ ] keep archives   "),
+        Line::from(" Type or paste URIs (Enter adds, Esc closes):"),
+        Line::from(Span::styled(format!(" > {input_line}"), Style::default().fg(Color::Yellow))),
+        Line::from("   one per line; file:// URIs work for local tests"),
         Line::from(""),
-        Line::from(" Tab: next field   Enter: add package   Esc: close "),
+        Line::from(" vim: j/k move  gg top  G bottom  Ctrl-D/U half  Ctrl-F/B page  arrows "),
+        Line::from("      h/l collapse/expand  Enter toggle  a add  space pause  d/D/x/r/e "),
     ])
     .block(block)
-    .wrap(Wrap { trim: false });
+    .wrap(Wrap { trim: true });
     frame.render_widget(content, modal_area);
 }
 
@@ -244,6 +334,26 @@ pub fn render_to_string(app: &App, width: u16, height: u16) -> String {
         for x in 0..width {
             let cell = buffer.cell((x, y)).unwrap();
             out.push_str(cell.symbol());
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// Helper for tests: render the status bar + history variant to string.
+pub fn render_with_to_string(app: &App, status: &str, width: u16, height: u16) -> String {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    let backend = TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|f| render_with(app, f, status, true))
+        .unwrap();
+    let buffer = terminal.backend().buffer().clone();
+    let mut out = String::new();
+    for y in 0..height {
+        for x in 0..width {
+            out.push_str(buffer.cell((x, y)).unwrap().symbol());
         }
         out.push('\n');
     }
@@ -314,7 +424,7 @@ mod tests {
         let mut app = App::new(Queue::new());
         app.show_add_modal = true;
         let s = render_to_string(&app, 80, 24);
-        assert!(s.contains("Add downloads"));
+        assert!(s.contains("Add —") || s.contains("Add downloads"), "modal missing, got:\n{s}");
     }
 
     #[test]
@@ -337,5 +447,35 @@ mod tests {
         let s = render_to_string(&app, 80, 24);
         assert!(s.contains("[r]e-add"), "gone row must show re-add, got:\n{s}");
         assert!(s.contains("[x]prune"), "gone row must show prune, got:\n{s}");
+    }
+
+    #[test]
+    fn status_and_history_panes_render() {
+        let mut q = Queue::new();
+        let done = q.add_package(
+            "blender.tar.xz",
+            "/tmp/blender",
+            vec![("blender.tar.xz".into(), "https://x/y".into())],
+        );
+        let m = q.packages[0].members[0].id;
+        q.set_member_progress(m, 1024, 1024);
+        q.set_member_state(m, MemberState::Complete);
+        let live = q.add_package(
+            "ubuntu.iso",
+            "/tmp/ubuntu",
+            vec![("ubuntu.iso".into(), "https://x/z".into())],
+        );
+        let m2 = q.packages[1].members[0].id;
+        q.set_member_progress(m2, 2048, 1024);
+        q.set_member_state(m2, MemberState::Downloading);
+        assert_ne!(done, live);
+
+        let app = App::new(q);
+        let s = render_with_to_string(&app, " seed 27241 | q quit", 100, 40);
+        assert!(s.contains("seed 27241"), "status line missing, got:\n{s}");
+        assert!(s.contains("History"), "history pane missing, got:\n{s}");
+        assert!(s.contains("blender.tar.xz"), "completed package missing from history, got:\n{s}");
+        assert!(s.contains("1.0 KiB"), "history should show human size, got:\n{s}");
+        assert!(s.contains("[DL]"), "active package stays visible in the queue, got:\n{s}");
     }
 }

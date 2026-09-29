@@ -6,15 +6,32 @@ accounts, and completion-gated auto-extraction.
 
 ## Status
 
-v1 is **built as libraries, not yet as a runnable binary**. There is no
-`main.rs` and no event loop wiring the UI to the engine yet, so there is
-nothing to `cargo run` today.
+v1 runs. The binary lives in `crates/ui` and shows the queue, a detail pane, a
+history pane of already-downloaded packages, and a log tail. It now drives a
+real managed-local `aria2c` when present, with a clear DEMO fallback when not.
+
+```bash
+nix shell nixpkgs#cargo nixpkgs#rustc nixpkgs#aria2 -c cargo build
+./target/debug/moon-down                          # state in $XDG_STATE_HOME/moon-down
+./target/debug/moon-down --state-dir /tmp/md-demo # throwaway state
+./target/debug/moon-down --aria-bin /run/current-system/sw/bin/aria2c  # explicit
+```
+
+Keys: `1`-`6` views, `j`/`k`/`gg`/`G`/`Ctrl-D/U/F/B` + arrows move, `Enter`/`h`/`l` expand/collapse, `space` pause/resume, `d`
+remove, `D` delete with files, `r` retry, `x` prune, `e` retry extraction, `a`
+add (live input, one URI per line), `q` or `Ctrl-C` quit.
+
+With `aria2c` on `PATH` the status bar shows `LIVE aria2c 127.0.0.1:PORT` and ticks
+a single authenticated POST batch (`tellActive/tellWaiting/tellStopped/getGlobalStat`);
+without it the bar shows `DEMO: simulated progress` and the log explains how to
+install (`nix shell nixpkgs#aria2`). History stays visible from `state.json` in
+both modes.
 
 | crate | what it owns |
 | --- | --- |
 | `crates/core` | queue state, persistence, settings, accounts, plugin trait, extraction logic |
 | `crates/engine` | managed-local `aria2c` child: spawn, poll, enqueue, stop, respawn, extract orchestration |
-| `crates/ui` | ratatui queue inspector and settings screen |
+| `crates/ui` | ratatui queue inspector, settings screen, and the `moon-down` binary |
 
 The full v1 contract lives in [issue #14](https://github.com/cernoh/moon-down/issues/14).
 Its tickets are tracked in issues #15–#20.
