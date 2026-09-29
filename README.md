@@ -6,15 +6,30 @@ accounts, and completion-gated auto-extraction.
 
 ## Status
 
-v1 is **built as libraries, not yet as a runnable binary**. There is no
-`main.rs` and no event loop wiring the UI to the engine yet, so there is
-nothing to `cargo run` today.
+v1 runs. The binary lives in `crates/ui` and shows the queue, a detail pane, a
+history pane of already-downloaded packages, and a log tail:
+
+```bash
+nix shell nixpkgs#cargo nixpkgs#rustc -c cargo build
+./target/debug/moon-down                          # state in $XDG_STATE_HOME/moon-down
+./target/debug/moon-down --state-dir /tmp/md-demo # throwaway state
+```
+
+Keys: `1`-`6` views, `j`/`k` move, `Enter` expand, `space` pause/resume, `d`
+remove, `D` delete with files, `r` retry, `x` prune, `e` retry extraction, `a`
+add, `q` or `Ctrl-C` quit.
+
+**Progress is simulated.** `crates/engine` can spawn and poll a real `aria2c`,
+but no JSON-RPC transport is wired into the event loop, so the tick advances
+bytes in memory and the status bar says `DEMO` so nobody mistakes it for real
+transfer. Swapping that tick for an engine poll is the next piece of work; the
+UI does not need to change.
 
 | crate | what it owns |
 | --- | --- |
 | `crates/core` | queue state, persistence, settings, accounts, plugin trait, extraction logic |
 | `crates/engine` | managed-local `aria2c` child: spawn, poll, enqueue, stop, respawn, extract orchestration |
-| `crates/ui` | ratatui queue inspector and settings screen |
+| `crates/ui` | ratatui queue inspector, settings screen, and the `moon-down` binary |
 
 The full v1 contract lives in [issue #14](https://github.com/cernoh/moon-down/issues/14).
 Its tickets are tracked in issues #15–#20.

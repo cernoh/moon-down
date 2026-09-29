@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "TUI crate for moon-down"
 
+[[bin]]
+name = "moon-down"
+path = "src/main.rs"
+
 [dependencies]
 moon-down-core = { path = "../core" }
 moon-down-engine = { path = "../engine" }
