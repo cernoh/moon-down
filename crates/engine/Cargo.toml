@@ -1,0 +1,9 @@
+[package]
+name = "moon-down-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Engine crate for moon-down (managed aria2c)"
+
+[dependencies]
+moon-down-core = { path = "../core" }

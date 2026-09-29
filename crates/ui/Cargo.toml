@@ -1,0 +1,9 @@
+[package]
+name = "moon-down-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "TUI crate for moon-down"
+
+[dependencies]
+moon-down-core = { path = "../core" }
