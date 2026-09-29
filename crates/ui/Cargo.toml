@@ -12,6 +12,11 @@ path = "src/main.rs"
 [dependencies]
 moon-down-core = { path = "../core" }
 moon-down-engine = { path = "../engine" }
+# aria2-rust is linked in, not shipped as a separate binary: the `aria2` lib crate
+# is the same code the `aria2c` binary runs, so there is nothing to install.
+aria2 = { git = "https://github.com/balovess/aria2_rust", package = "aria2", default-features = false, features = ["standard"] }
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread"] }
 ratatui = "0.29"
 crossterm = "0.28"
 serde_json = "1"

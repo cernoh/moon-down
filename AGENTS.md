@@ -114,18 +114,31 @@ Default section order:
   (.tmp+rename), stale→gone, retry handle-swap, per-host account records with
   keyring-only secrets, plugin trait, nine global settings, archive extraction
   (zip/tar in-Rust, 7z/rar via external binary); verification: `cargo test -p moon-down-core`
-- `crates/engine/` — managed-local aria2c child: spawn with ephemeral secret and
-  0600 conf, first free port in 6800-6899, state-dir lock, one batched poll tick,
-  enqueue with credential stripping, polite/forced/kill stop, single respawn,
-  extraction orchestration on blocking threads
+- `crates/engine/` — embedded aria2-rust daemon. `Daemon::ensure_running(state_dir,
+  exe, download_dir)` writes a 0600 `aria2.conf` and `daemon.json` (port + secret),
+  re-executes this binary with `--daemon` after `setsid` in `pre_exec`, and attaches by
+  loopback JSON-RPC via `RpcClient` (ureq, no TLS: loopback only). `Tick::from_batch`
+  parses the four-call batch and `Tick::apply` folds it into the queue. Enqueue
+  requests keep credential stripping and token auth. Never let aria2-rust daemonize
+  itself: `--daemon=true` double-forks from inside its tokio runtime and the child
+  deadlocks on a vanished thread's lock, so the detach must happen before exec.
+  Liveness is the RPC `getVersion` ping, not a pid file — aria2-rust only writes one in
+  its own daemon mode, which we do not use. `daemon=true` stays off the conf file.
+  Two guards in `Tick::apply` are load-bearing: a gid we do not own suppresses
+  reconcile (another client's work must not mark our queue gone), and a terminal row is
+  never written to (an errored member must not show live bytes).
 - `crates/ui/` — ratatui queue inspector and the `moon-down` binary: one event loop
   owning state, render on state change only, queue always visible, keys
-  1-6/j/k/gg/G/Ctrl-D/U/F/B/arrows/h/l/Enter/space/d/D/r/x/e/a, settings screen,
-  plus a status bar (LIVE vs DEMO) and a completed-history pane. Row heights and
-  the accent colour derive from the design seed documented in `crates/ui/src/main.rs`
-  — change the seed, not the numbers. The binary spawns the engine's `aria2c`
-  when present (JSON-RPC batch tick → Tick::apply) and falls back to simulated
-  progress with a loud log line when missing
+  1-6/j/k/gg/G/Ctrl-D/U/F/B/arrows/h/l/Enter/space/d/D/r/x/e/a, settings screen, plus a
+  status bar and a completed-history pane. Row heights and the accent colour derive from
+  the design seed documented in `crates/ui/src/main.rs` — change the seed, not the
+  numbers. Two modes: plain `moon-down` is the TUI (ensures the daemon is up on first
+  run, then only polls it), `moon-down --daemon` is the aria2-rust host that self-detaches
+  and outlives the TUI. Progress is real, not simulated. Downloads land in
+  `default_download_dir` (XDG_DOWNLOAD_DIR, then ~/Downloads/moon-down, then the state
+  dir) — never inside the state dir when a real download dir exists.
+  `--enable-rpc=true` must be on argv: aria2-rust refuses an RPC-only service with no
+  download input otherwise
 - `.agents/skills/` — agent skills owned by this repo; `herdr/` documents driving the
   Herdr workspace CLI (layout IDs, tab/pane recipes, agent lifecycle). `herdr --skill`
   stays the upstream authority

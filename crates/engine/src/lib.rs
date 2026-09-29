@@ -1,18 +1,17 @@
-//! Managed-local aria2c child — spawn, poll, enqueue, shutdown, respawn.
-//! Ponytail: shortest diff that satisfies the 8 criteria, no speculative abstractions.
+//! Embedded aria2-rust daemon: start it detached, attach by RPC, enqueue, stop.
+//! Ponytail: no external binary to find, no HTTP client crate, no abstractions
+//! without a caller.
 
-pub mod secret;
-pub mod lock;
+pub mod client;
+pub mod daemon;
+pub mod extract;
 pub mod port;
 pub mod rpc;
+pub mod secret;
 pub mod strip;
-pub mod engine;
-pub mod extract;
-pub mod client;
 
 pub use client::{ClientError, RpcClient, RpcError};
-pub use engine::{Engine, EngineError, StartOptions};
-pub use lock::{DirLock, LockError};
+pub use daemon::{Daemon, DaemonInfo};
 pub use port::{pick_free_port, pick_free_port_in};
 pub use rpc::{
     build_change_global_option, build_enqueue_with_auth, build_poll_batch, EnqueueKind,
