@@ -120,11 +120,12 @@ Default section order:
   extraction orchestration on blocking threads
 - `crates/ui/` — ratatui queue inspector and the `moon-down` binary: one event loop
   owning state, render on state change only, queue always visible, keys
-  1-6/j/k/space/d/D/r/x/e/a, settings screen, plus a status bar and a
-  completed-history pane. Row heights and the accent colour derive from the
-  design seed documented in `crates/ui/src/main.rs` — change the seed, not the
-  numbers. The binary drives simulated progress (the status bar says DEMO) until
-  the JSON-RPC transport lands
+  1-6/j/k/gg/G/Ctrl-D/U/F/B/arrows/h/l/Enter/space/d/D/r/x/e/a, settings screen,
+  plus a status bar (LIVE vs DEMO) and a completed-history pane. Row heights and
+  the accent colour derive from the design seed documented in `crates/ui/src/main.rs`
+  — change the seed, not the numbers. The binary spawns the engine's `aria2c`
+  when present (JSON-RPC batch tick → Tick::apply) and falls back to simulated
+  progress with a loud log line when missing
 - `.agents/skills/` — agent skills owned by this repo; `herdr/` documents driving the
   Herdr workspace CLI (layout IDs, tab/pane recipes, agent lifecycle). `herdr --skill`
   stays the upstream authority

@@ -95,15 +95,19 @@ impl Engine {
         if child.is_none() && opts.mock_sleep_secs.is_some() {
             child = try_spawn_child(Some("sleep"), &config_path, port, &session_path, &log_path, state_dir, opts.mock_sleep_secs);
         }
-        if child.is_none() && opts.aria_bin.is_none() {
-            // no mock requested and aria2c not found -> still consider started for lifecycle tests
-            // but surface spawn error if caller expected real binary
-            // For acceptance, we allow mock mode without aria2c.
+        if child.is_none() {
+            // Loud failure: a caller asking for the real engine must not get a
+            // half-started one. Never kill whatever holds a port; never leave the
+            // lock or conf behind for the next start to trip over.
+            let _ = fs::remove_file(&config_path);
+            return Err(EngineError::Spawn(match opts.aria_bin.as_deref() {
+                Some(bin) => format!("could not spawn {bin}"),
+                None => "aria2c not found in PATH — install it (nix shell nixpkgs#aria2) or pass a path".into(),
+            }));
         }
 
-        if let Some(ref c) = child {
-            let _ = fs::write(&pid_path, c.id().to_string());
-        }
+        let child = child.expect("checked above");
+        let _ = fs::write(&pid_path, child.id().to_string());
 
         Ok(Self {
             state_dir: state_dir.to_path_buf(),
@@ -113,7 +117,7 @@ impl Engine {
             pid_path,
             session_path,
             lock: Some(lock),
-            child,
+            child: Some(child),
             crash_count: 0,
             crashed: false,
             fatal_error: None,
@@ -124,6 +128,53 @@ impl Engine {
 
     pub fn rpc_url(&self) -> String {
         format!("http://127.0.0.1:{}/jsonrpc", self.port)
+    }
+
+    /// A cheap handle to the same endpoint, so callers can hold a live client
+    /// while `&mut Engine` is borrowed (shutdown needs both).
+    pub fn client(&self) -> crate::client::RpcClient {
+        crate::client::RpcClient::new(self.rpc_url(), &self.secret)
+    }
+
+    /// One tick: POST the four-call batch and parse it.
+    pub fn tick(&self, id: u64) -> Result<crate::rpc::Tick, crate::client::ClientError> {
+        self.client().tick(id)
+    }
+
+    /// Enqueue links, returning the gids aria2c assigned, in request order.
+    /// `options` are aria2 per-download options (e.g. http-user/http-passwd from an
+    /// account record); URIs are always credential-stripped before they go out.
+    pub fn add_uris(
+        &self,
+        uris: &[String],
+        options: &std::collections::HashMap<String, String>,
+        id: u64,
+    ) -> Result<Vec<String>, crate::client::ClientError> {
+        if uris.is_empty() {
+            return Ok(Vec::new());
+        }
+        let (req, _stored) = crate::rpc::build_enqueue_with_auth(
+            &self.secret,
+            EnqueueKind::Uris(uris.to_vec()),
+            id,
+            options,
+        );
+        let reply = self.client().post(&req)?;
+        let result = reply.get("result").ok_or_else(|| crate::client::ClientError::BadReply("addUri returned no result".into()))?;
+        let gids = if let Some(s) = result.as_str() {
+            vec![s.to_string()]
+        } else if let Some(arr) = result.as_array() {
+            arr.iter().filter_map(|g| g.as_str().map(|s| s.to_string())).collect()
+        } else {
+            return Err(crate::client::ClientError::BadReply(format!("addUri result not string/array: {result}")));
+        };
+        Ok(gids)
+    }
+
+    /// Stop the child if it is already gone: the engine never outlives the tick
+    /// loop that owns it. Returns true when a live child was reaped.
+    pub fn reap_if_dead(&mut self) -> bool {
+        !self.is_alive()
     }
 
     /// One tick = one batched POST of 4 calls, all authenticated.

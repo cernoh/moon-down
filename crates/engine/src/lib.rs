@@ -8,13 +8,15 @@ pub mod rpc;
 pub mod strip;
 pub mod engine;
 pub mod extract;
+pub mod client;
 
+pub use client::{ClientError, RpcClient, RpcError};
 pub use engine::{Engine, EngineError, StartOptions};
 pub use lock::{DirLock, LockError};
-pub use port::pick_free_port;
+pub use port::{pick_free_port, pick_free_port_in};
 pub use rpc::{
     build_change_global_option, build_enqueue_with_auth, build_poll_batch, EnqueueKind,
-    StoredRecord,
+    GlobalStat, StatusEntry, StoredRecord, Tick,
 };
 pub use secret::generate_secret;
 pub use strip::strip_credentials;

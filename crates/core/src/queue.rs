@@ -338,6 +338,16 @@ impl Queue {
         None
     }
 
+    /// Find a member by the engine handle (aria2 gid) currently attached to it.
+    /// The engine tick uses this to fold daemon state onto queue rows.
+    pub fn member_id_by_handle(&self, handle: &str) -> Option<u64> {
+        self.packages
+            .iter()
+            .flat_map(|p| p.members.iter())
+            .find(|m| m.handle.as_deref() == Some(handle))
+            .map(|m| m.id)
+    }
+
     pub fn find_package(&self, package_id: u64) -> Option<&Package> {
         self.packages.iter().find(|p| p.id == package_id)
     }

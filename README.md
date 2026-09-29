@@ -7,23 +7,25 @@ accounts, and completion-gated auto-extraction.
 ## Status
 
 v1 runs. The binary lives in `crates/ui` and shows the queue, a detail pane, a
-history pane of already-downloaded packages, and a log tail:
+history pane of already-downloaded packages, and a log tail. It now drives a
+real managed-local `aria2c` when present, with a clear DEMO fallback when not.
 
 ```bash
-nix shell nixpkgs#cargo nixpkgs#rustc -c cargo build
+nix shell nixpkgs#cargo nixpkgs#rustc nixpkgs#aria2 -c cargo build
 ./target/debug/moon-down                          # state in $XDG_STATE_HOME/moon-down
 ./target/debug/moon-down --state-dir /tmp/md-demo # throwaway state
+./target/debug/moon-down --aria-bin /run/current-system/sw/bin/aria2c  # explicit
 ```
 
-Keys: `1`-`6` views, `j`/`k` move, `Enter` expand, `space` pause/resume, `d`
+Keys: `1`-`6` views, `j`/`k`/`gg`/`G`/`Ctrl-D/U/F/B` + arrows move, `Enter`/`h`/`l` expand/collapse, `space` pause/resume, `d`
 remove, `D` delete with files, `r` retry, `x` prune, `e` retry extraction, `a`
-add, `q` or `Ctrl-C` quit.
+add (live input, one URI per line), `q` or `Ctrl-C` quit.
 
-**Progress is simulated.** `crates/engine` can spawn and poll a real `aria2c`,
-but no JSON-RPC transport is wired into the event loop, so the tick advances
-bytes in memory and the status bar says `DEMO` so nobody mistakes it for real
-transfer. Swapping that tick for an engine poll is the next piece of work; the
-UI does not need to change.
+With `aria2c` on `PATH` the status bar shows `LIVE aria2c 127.0.0.1:PORT` and ticks
+a single authenticated POST batch (`tellActive/tellWaiting/tellStopped/getGlobalStat`);
+without it the bar shows `DEMO: simulated progress` and the log explains how to
+install (`nix shell nixpkgs#aria2`). History stays visible from `state.json` in
+both modes.
 
 | crate | what it owns |
 | --- | --- |

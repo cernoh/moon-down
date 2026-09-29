@@ -38,6 +38,7 @@ pub struct App {
     pub selected: usize,
     pub expanded: HashSet<u64>,
     pub show_add_modal: bool,
+    pub add_input: String,
     pub logs: Vec<String>,
     dirty: bool,
     pending_delete: Option<u64>,
@@ -52,6 +53,7 @@ impl App {
             selected: 0,
             expanded: HashSet::new(),
             show_add_modal: false,
+            add_input: String::new(),
             logs: Vec::new(),
             dirty: true,
             pending_delete: None,
@@ -373,6 +375,53 @@ impl App {
 
     pub fn is_modal_open(&self) -> bool {
         self.show_add_modal
+    }
+
+    // ---- vim-style movement ----
+    pub fn move_top(&mut self) {
+        if self.selected != 0 {
+            self.selected = 0;
+            self.dirty = true;
+        }
+    }
+    pub fn move_bottom(&mut self) {
+        let n = self.flat_rows().len();
+        if n > 0 && self.selected + 1 != n {
+            self.selected = n - 1;
+            self.dirty = true;
+        }
+    }
+    pub fn page_down(&mut self, lines: usize) {
+        let n = self.flat_rows().len();
+        if n == 0 { return; }
+        let next = (self.selected + lines).min(n - 1);
+        if next != self.selected { self.selected = next; self.dirty = true; }
+    }
+    pub fn page_up(&mut self, lines: usize) {
+        let next = self.selected.saturating_sub(lines);
+        if next != self.selected { self.selected = next; self.dirty = true; }
+    }
+    pub fn move_by(&mut self, delta: isize) {
+        if delta > 0 { self.page_down(delta as usize); } else if delta < 0 { self.page_up((-delta) as usize); }
+    }
+
+    // ---- add modal input ----
+    pub fn add_input_push(&mut self, c: char) { self.add_input.push(c); self.dirty = true; }
+    pub fn add_input_pop(&mut self) { if self.add_input.pop().is_some() { self.dirty = true; } }
+    pub fn add_input_clear(&mut self) { if !self.add_input.is_empty() { self.add_input.clear(); self.dirty = true; } }
+    pub fn take_add_input(&mut self) -> String { let s = std::mem::take(&mut self.add_input); self.dirty = true; s }
+    pub fn submit_add_uris(&mut self, uris: Vec<String>, target_dir: String) -> Option<u64> {
+        if uris.is_empty() { return None; }
+        let entries: Vec<(String,String)> = uris.iter().map(|u| {
+            let name = u.rsplit('/').next().unwrap_or("download").split(['?','#']).next().unwrap_or("download").to_string();
+            let name = if name.is_empty() { "download".into() } else { name };
+            (name, u.clone())
+        }).collect();
+        let pkg_name = entries[0].0.clone();
+        let pkg_id = self.queue.add_package(&pkg_name, &target_dir, entries);
+        self.dirty = true;
+        self.clamp_selection();
+        Some(pkg_id)
     }
 }
 

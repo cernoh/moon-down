@@ -83,7 +83,7 @@ pub fn render_with(app: &App, frame: &mut Frame, status: &str, show_history: boo
     render_log(app, frame, log);
 
     if app.show_add_modal {
-        render_add_modal(frame, area);
+        render_add_modal(frame, area, &app.add_input);
     }
 }
 
@@ -152,7 +152,7 @@ fn render_top(app: &App, frame: &mut Frame, area: Rect) {
         View::Accounts => " Accounts [3] — Queue below ",
         View::Settings => " Settings [4] — Queue below ",
         View::Log => " Queue — Log focus [5] ",
-        View::Help => " Help [6] ",
+        View::Help => " Help [6] — vim: j/k gg/G Ctrl-D/U Ctrl-F/B arrows/hjkl ",
     };
     let block = Block::default().borders(Borders::ALL).title(title);
 
@@ -294,29 +294,28 @@ fn render_log(app: &App, frame: &mut Frame, area: Rect) {
     frame.render_widget(para, area);
 }
 
-fn render_add_modal(frame: &mut Frame, area: Rect) {
-    let modal_w = 60.min(area.width.saturating_sub(4));
-    let modal_h = 14.min(area.height.saturating_sub(4));
+fn render_add_modal(frame: &mut Frame, area: Rect, input: &str) {
+    let modal_w = 66.min(area.width.saturating_sub(4));
+    let modal_h = 12.min(area.height.saturating_sub(4));
     let x = (area.width - modal_w) / 2;
     let y = (area.height - modal_h) / 2;
     let modal_area = Rect::new(x, y, modal_w, modal_h);
     frame.render_widget(Clear, modal_area);
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Add downloads (Esc to close, Enter to submit) ")
+        .title(" Add — paste URIs, Enter to enqueue, Esc to close ")
         .style(Style::default().bg(Color::Black).fg(Color::White));
+    let input_line = if input.is_empty() { "(type a URI — e.g. https://example.com/a.iso or file:///tmp/a)" } else { input };
     let content = Paragraph::new(vec![
-        Line::from(" URIs / magnets (one per line):"),
-        Line::from(" ┌─────────────────────────────────┐"),
-        Line::from(" │                                 │"),
-        Line::from(" └─────────────────────────────────┘"),
-        Line::from(" Target dir: [                    ]"),
-        Line::from(" [x] extract  [ ] keep archives   "),
+        Line::from(" Type or paste URIs (Enter adds, Esc closes):"),
+        Line::from(Span::styled(format!(" > {input_line}"), Style::default().fg(Color::Yellow))),
+        Line::from("   one per line; file:// URIs work for local tests"),
         Line::from(""),
-        Line::from(" Tab: next field   Enter: add package   Esc: close "),
+        Line::from(" vim: j/k move  gg top  G bottom  Ctrl-D/U half  Ctrl-F/B page  arrows "),
+        Line::from("      h/l collapse/expand  Enter toggle  a add  space pause  d/D/x/r/e "),
     ])
     .block(block)
-    .wrap(Wrap { trim: false });
+    .wrap(Wrap { trim: true });
     frame.render_widget(content, modal_area);
 }
 
@@ -425,7 +424,7 @@ mod tests {
         let mut app = App::new(Queue::new());
         app.show_add_modal = true;
         let s = render_to_string(&app, 80, 24);
-        assert!(s.contains("Add downloads"));
+        assert!(s.contains("Add —") || s.contains("Add downloads"), "modal missing, got:\n{s}");
     }
 
     #[test]
