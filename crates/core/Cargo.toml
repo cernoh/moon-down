@@ -1,0 +1,19 @@
+[package]
+name = "moon-down-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Core queue state for moon-down"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+keyring = { version = "3", optional = true }
+zip = "2"
+tar = "0.4"
+flate2 = "1"
+bzip2 = "0.4"
+xz2 = "0.1"
+
+[dev-dependencies]
+tempfile = "3"

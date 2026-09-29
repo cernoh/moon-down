@@ -100,7 +100,9 @@ relevant child AGENTS.md
 
 ## Child DOX Index
 
-This project is not yet indexed. Before continuing you must scan the project,
-build the DOX tree and replace this message with the actual index. Go deep and
-scan files recursively to properly evaluate complexity and create nested DOX
-files where needed.
+- `crates/core/` — queue state: package/member model, worst-case rollup, byte-weighted progress, atomic persistence (.tmp+rename), stale→gone, retry handle-swap; verification: `cargo test -p moon-down-core`
+- `crates/engine/` — managed-local aria2c surface (re-exports core queue; engine lifecycle lands in #16)
+- `crates/ui/` — TUI surface (re-exports core queue; ratatui work lands in #17)
+- Root workspace `Cargo.toml` owns member list and shared package version
+
+No child AGENTS.md yet — crates are thin scaffolds with single-file APIs; add child docs when engine/UI gain durable local contracts.
