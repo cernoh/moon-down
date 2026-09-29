@@ -7,3 +7,12 @@ description = "Engine crate for moon-down (managed aria2c)"
 
 [dependencies]
 moon-down-core = { path = "../core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+rand = "0.8"
+fs2 = "0.4"
+
+[dev-dependencies]
+tempfile = "3"
+serde_json = "1"

@@ -1,4 +1,16 @@
-//! Engine crate — managed-local aria2c integration.
-//! Queue scaffolding re-exports core state so engine and UI share the same model.
+//! Managed-local aria2c child — spawn, poll, enqueue, shutdown, respawn.
+//! Ponytail: shortest diff that satisfies the 8 criteria, no speculative abstractions.
 
-pub use moon_down_core::{load_state, save_state, Member, MemberState, Package, PackageStatus, Queue};
+pub mod secret;
+pub mod lock;
+pub mod port;
+pub mod rpc;
+pub mod strip;
+pub mod engine;
+
+pub use engine::{Engine, EngineError, StartOptions};
+pub use lock::{DirLock, LockError};
+pub use port::pick_free_port;
+pub use rpc::{build_poll_batch, EnqueueKind, StoredRecord};
+pub use secret::generate_secret;
+pub use strip::strip_credentials;
