@@ -61,6 +61,17 @@ impl Member {
     }
 }
 
+fn default_true() -> bool { true }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExtractStatus {
+    Idle,
+    Extracting,
+    Extracted,
+    ExtractFailed,
+}
+impl Default for ExtractStatus { fn default() -> Self { Self::Idle } }
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Package {
     pub id: u64,
@@ -68,6 +79,16 @@ pub struct Package {
     pub target_dir: String,
     pub created_at_ms: u64,
     pub members: Vec<Member>,
+    #[serde(default = "default_true")]
+    pub extract_enabled: bool,
+    #[serde(default = "default_true")]
+    pub extract_stem_subdir: bool,
+    #[serde(default = "default_true")]
+    pub keep_archives: bool,
+    #[serde(default)]
+    pub extract_status: ExtractStatus,
+    #[serde(default)]
+    pub extract_error: Option<String>,
 }
 
 impl Package {
@@ -117,6 +138,19 @@ impl Package {
     pub fn is_terminal(&self) -> bool {
         self.status().is_terminal()
     }
+
+    pub fn is_extract_ready(&self) -> bool {
+        self.extract_enabled
+            && self.extract_status == ExtractStatus::Idle
+            && self.status() == PackageStatus::Complete
+    }
+
+    pub fn retry_extract(&mut self) {
+        if self.extract_status == ExtractStatus::ExtractFailed {
+            self.extract_status = ExtractStatus::Idle;
+            self.extract_error = None;
+        }
+    }
 }
 
 /// Queue owns packages in user order. Each package owns its members (and their single active handle).
@@ -162,6 +196,11 @@ impl Queue {
             target_dir: target_dir.into(),
             created_at_ms: 0,
             members: pkg_members,
+            extract_enabled: true,
+            extract_stem_subdir: true,
+            keep_archives: true,
+            extract_status: ExtractStatus::Idle,
+            extract_error: None,
         });
         pid
     }
@@ -329,6 +368,11 @@ mod tests {
             target_dir: "/tmp".into(),
             created_at_ms: 0,
             members,
+            extract_enabled: true,
+            extract_stem_subdir: true,
+            keep_archives: true,
+            extract_status: ExtractStatus::Idle,
+            extract_error: None,
         }
     }
 

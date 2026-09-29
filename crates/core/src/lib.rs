@@ -1,4 +1,5 @@
 pub mod accounts;
+pub mod extract;
 pub mod persistence;
 pub mod plugin;
 pub mod queue;

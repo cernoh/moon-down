@@ -7,6 +7,7 @@ pub mod port;
 pub mod rpc;
 pub mod strip;
 pub mod engine;
+pub mod extract;
 
 pub use engine::{Engine, EngineError, StartOptions};
 pub use lock::{DirLock, LockError};
