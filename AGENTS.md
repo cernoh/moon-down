@@ -120,6 +120,9 @@ Default section order:
   extraction orchestration on blocking threads
 - `crates/ui/` — ratatui queue inspector: one event loop owning state, render on
   state change only, queue always visible, keys 1-6/j/k/space/d/D/r/x/e/a, settings screen
+- `.agents/skills/` — agent skills owned by this repo; `herdr/` documents driving the
+  Herdr workspace CLI (layout IDs, tab/pane recipes, agent lifecycle). `herdr --skill`
+  stays the upstream authority
 - Root workspace `Cargo.toml` owns member list and shared package version
 
 No child AGENTS.md yet — crates are single-file modules with no durable local
