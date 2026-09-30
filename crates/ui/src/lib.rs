@@ -4,6 +4,8 @@
 pub mod app;
 pub mod render;
 pub mod settings_screen;
+#[cfg(feature = "tray")]
+pub mod tray;
 
 pub use app::{App, View};
 pub use moon_down_core::{MemberState, PackageStatus, Queue};

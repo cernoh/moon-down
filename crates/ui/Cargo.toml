@@ -12,9 +12,42 @@ path = "src/main.rs"
 [dependencies]
 moon-down-core = { path = "../core" }
 moon-down-engine = { path = "../engine" }
+# aria2-rust is linked in, not shipped as a separate binary: the `aria2` lib crate
+# is the same code the `aria2c` binary runs, so there is nothing to install.
+aria2 = { git = "https://github.com/balovess/aria2_rust", package = "aria2", default-features = false, features = ["standard"] }
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread"] }
 ratatui = "0.29"
 crossterm = "0.28"
 serde_json = "1"
+
+# Optional system-tray icon (`moon-down --tray`). Off by default so the normal
+# build needs no GUI stack; see flake.nix for the dev shell that can build it.
+[features]
+tray = ["dep:tray-icon", "dep:glib", "dep:gtk", "dep:muda"]
+
+[dependencies.tray-icon]
+version = "0.19"
+# Default features enable `libxdo`, which muda uses only for the predefined
+# Copy/Cut/Paste/SelectAll items — none of which this tray uses. nixpkgs ships
+# no linkable libxdo either (the `xdo` package is the program only), so leaving
+# the feature on fails at link time.
+default-features = false
+optional = true
+
+[dependencies.glib]
+version = "0.18"
+optional = true
+
+[dependencies.gtk]
+version = "0.18"
+optional = true
+
+[dependencies.muda]
+version = "0.15"
+# Same reason as tray-icon above: keep the libxdo default off graph-wide.
+default-features = false
+optional = true
 
 [dev-dependencies]
 tempfile = "3"

@@ -3,7 +3,7 @@ name = "moon-down-engine"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Engine crate for moon-down (managed aria2c)"
+description = "Engine crate for moon-down (embedded aria2-rust daemon)"
 
 [dependencies]
 moon-down-core = { path = "../core" }
@@ -11,7 +11,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
 rand = "0.8"
-fs2 = "0.4"
+# setsid(2) in Command::pre_exec, to detach the daemon before exec.
+libc = "0.2"
+# No default features: the daemon is bound to loopback only, so TLS is dead weight.
 ureq = { version = "2", default-features = false }
 
 [dev-dependencies]

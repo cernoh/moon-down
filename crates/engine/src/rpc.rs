@@ -260,15 +260,33 @@ impl Tick {
         })
     }
 
-    /// Fold one tick into the queue. Handles the daemon does not know about stay
-    /// untouched; handles it forgot become gone rows rather than disappearing.
-    pub fn apply(&self, queue: &mut moon_down_core::Queue) {
-        let live: Vec<String> = self.all().map(|e| e.gid.clone()).collect();
+    /// Fold one tick into the queue. Returns true if anything the queue pane
+    /// draws moved, so the caller can keep rendering on state change only.
+    ///
+    /// Reconcile is always safe: tellActive + tellWaiting + tellStopped is the
+    /// daemon's *complete* set (Tick::from_batch rejects a short batch outright),
+    /// so a handle missing from it really is gone. Gids we do not own are simply
+    /// skipped — another client's download does not disturb our rows.
+    ///
+    /// A terminal row is left completely alone. Writing progress onto an errored
+    /// member makes it show live bytes for a download that is not running, and
+    /// `set_member_state` would refuse the state change anyway.
+    pub fn apply(&self, queue: &mut moon_down_core::Queue) -> bool {
+        let before = fingerprint(queue);
+        let mut live: Vec<String> = Vec::new();
 
         for e in self.all() {
+            live.push(e.gid.clone());
             let Some(mid) = queue.member_id_by_handle(&e.gid) else {
                 continue; // a download we did not add (e.g. a session resume)
             };
+            if queue
+                .find_member(mid)
+                .map(|m| m.state.is_terminal())
+                .unwrap_or(true)
+            {
+                continue;
+            }
             queue.set_member_progress(mid, e.total(), e.completed());
             let next = e.member_state();
             // A terminal row stays terminal until the user acts; core enforces that.
@@ -278,7 +296,20 @@ impl Tick {
             }
         }
         queue.reconcile(&live);
+
+        fingerprint(queue) != before
     }
+}
+
+/// Cheap signature of everything the queue pane draws, used instead of trusting
+/// a "did anything move" flag from the daemon.
+fn fingerprint(queue: &moon_down_core::Queue) -> Vec<(u64, MemberState, u64, u64)> {
+    queue
+        .packages
+        .iter()
+        .flat_map(|p| p.members.iter())
+        .map(|m| (m.id, m.state.clone(), m.completed_bytes, m.total_bytes))
+        .collect()
 }
 
 #[cfg(test)]
@@ -358,6 +389,78 @@ mod tests {
         assert_eq!(q.find_member(mid).unwrap().completed_bytes, 250);
         assert_eq!(q.find_member(mid).unwrap().total_bytes, 1000);
         assert_eq!(q.find_member(mid2).unwrap().state, MemberState::Gone);
+    }
+
+    /// Another client's download sharing the daemon must not disturb our rows.
+    #[test]
+    fn foreign_gid_coexisting_with_ours_is_harmless() {
+        let mut q = moon_down_core::Queue::new();
+        q.add_package("p", "/tmp", vec![("a".into(), "https://x/a".into())]);
+        let mid = q.packages[0].members[0].id;
+        q.set_member_handle(mid, "g1".into());
+        q.set_member_state(mid, MemberState::Downloading);
+
+        let foreign = StatusEntry {
+            gid: "deadbeef".into(),
+            status: "active".into(),
+            total_length: "5".into(),
+            completed_length: "5".into(),
+            download_speed: "0".into(),
+            error_message: String::new(),
+            dir: String::new(),
+            files: vec![],
+        };
+        // Added to, not substituted for, the real gids: ours is still running.
+        let mut tick = Tick::from_batch(&sample_batch()).unwrap();
+        tick.active.push(foreign);
+        tick.apply(&mut q);
+
+        let m = q.find_member(mid).unwrap();
+        assert_eq!(m.state, MemberState::Downloading, "our row keeps running");
+        assert_eq!(m.completed_bytes, 250, "our bytes still update");
+    }
+
+    /// A handle the daemon no longer reports at all really is gone: the three
+    /// lists are the complete set, so absence is evidence.
+    #[test]
+    fn handle_absent_from_a_complete_tick_becomes_gone() {
+        let mut q = moon_down_core::Queue::new();
+        q.add_package("p", "/tmp", vec![("a".into(), "https://x/a".into())]);
+        let mid = q.packages[0].members[0].id;
+        q.set_member_handle(mid, "not-in-any-list".into());
+        q.set_member_state(mid, MemberState::Downloading);
+
+        Tick::from_batch(&sample_batch()).unwrap().apply(&mut q);
+        assert_eq!(q.find_member(mid).unwrap().state, MemberState::Gone);
+    }
+
+    /// An errored row is not a running download; it must not show live bytes.
+    #[test]
+    fn terminal_row_is_never_overwritten_by_a_later_record() {
+        let mut q = moon_down_core::Queue::new();
+        q.add_package("p", "/tmp", vec![("a".into(), "https://x/a".into())]);
+        let mid = q.packages[0].members[0].id;
+        q.set_member_handle(mid, "g1".into());
+        q.set_member_error(mid, "connection reset");
+
+        // the daemon now reports the same gid as active again
+        Tick::from_batch(&sample_batch()).unwrap().apply(&mut q);
+
+        let m = q.find_member(mid).unwrap();
+        assert_eq!(m.state, MemberState::Error);
+        assert_eq!(m.completed_bytes, 0, "no live bytes on an errored row");
+    }
+
+    /// render-on-change depends on apply reporting movement, not just doing it.
+    #[test]
+    fn apply_reports_whether_anything_moved() {
+        let mut q = moon_down_core::Queue::new();
+        q.add_package("p", "/tmp", vec![("a".into(), "https://x/a".into())]);
+        let mid = q.packages[0].members[0].id;
+        q.set_member_handle(mid, "g1".into());
+        let tick = Tick::from_batch(&sample_batch()).unwrap();
+        assert!(tick.apply(&mut q), "first tick moves the row");
+        assert!(!tick.apply(&mut q), "identical tick is not a change");
     }
 
     #[test]
