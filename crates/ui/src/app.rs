@@ -1,6 +1,20 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 
+use moon_down_core::settings::{format_bytes, load_settings, save_settings, Settings};
 use moon_down_core::{MemberState, Queue};
+
+pub const SETTINGS_FIELDS: &[&str] = &[
+    "max_concurrent_downloads",
+    "download_limit",
+    "upload_limit",
+    "split",
+    "connections_per_server",
+    "min_split_size",
+    "dir",
+    "max_tries",
+    "retry_wait",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
@@ -43,6 +57,14 @@ pub struct App {
     dirty: bool,
     pending_delete: Option<u64>,
     extract_failed: HashSet<u64>,
+    // settings editing
+    pub settings: Settings,
+    pub settings_selected: usize,
+    pub settings_editing: Option<String>,
+    pub settings_hints: HashMap<String, String>,
+    pub settings_error: Option<String>,
+    pub settings_pending_rpc: Option<(String, String)>,
+    settings_config_path: Option<PathBuf>,
 }
 
 impl App {
@@ -58,6 +80,113 @@ impl App {
             dirty: true,
             pending_delete: None,
             extract_failed: HashSet::new(),
+            settings: Settings::default(),
+            settings_selected: 0,
+            settings_editing: None,
+            settings_hints: HashMap::new(),
+            settings_error: None,
+            settings_pending_rpc: None,
+            settings_config_path: None,
+        }
+    }
+
+    pub fn init_settings(&mut self, state_dir: &std::path::Path) {
+        let cfg = state_dir.join("settings.json");
+        self.settings = load_settings(&cfg, state_dir).unwrap_or_else(|_| Settings::default_for(state_dir));
+        self.settings_config_path = Some(cfg);
+        self.dirty = true;
+    }
+
+    pub fn settings_fields(&self) -> Vec<(&'static str, String)> {
+        vec![
+            ("max_concurrent_downloads", self.settings.max_concurrent_downloads.to_string()),
+            ("download_limit", self.settings.max_overall_download_limit.map(format_bytes).unwrap_or_default()),
+            ("upload_limit", self.settings.max_overall_upload_limit.map(format_bytes).unwrap_or_default()),
+            ("split", self.settings.split.to_string()),
+            ("connections_per_server", self.settings.max_connection_per_server.to_string()),
+            ("min_split_size", format_bytes(self.settings.min_split_size)),
+            ("dir", self.settings.dir.display().to_string()),
+            ("max_tries", self.settings.max_tries.to_string()),
+            ("retry_wait", self.settings.retry_wait.to_string()),
+        ]
+    }
+
+    pub fn take_settings_rpc(&mut self) -> Option<(String, String)> {
+        self.settings_pending_rpc.take()
+    }
+
+    fn settings_current_value(&self, field: &str) -> String {
+        self.settings_fields().into_iter().find(|(k, _)| *k == field).map(|(_, v)| v).unwrap_or_default()
+    }
+
+    fn persist_settings(&self) {
+        if let Some(p) = &self.settings_config_path {
+            let _ = save_settings(&self.settings, p);
+        }
+    }
+
+    fn commit_settings_field(&mut self, field: &str, raw: &str) {
+        self.settings_error = None;
+        let hint: Option<String>;
+        let res: Result<Option<String>, String> = match field {
+            "max_concurrent_downloads" => {
+                let n: i64 = raw.trim().parse().unwrap_or(self.settings.max_concurrent_downloads as i64);
+                hint = self.settings.set_max_concurrent_downloads(n);
+                if let Some(h) = hint.clone() { self.settings_hints.insert(field.into(), h); } else { self.settings_hints.remove(field); }
+                Ok(hint)
+            }
+            "download_limit" => self.settings.set_download_limit_str(raw),
+            "upload_limit" => self.settings.set_upload_limit_str(raw),
+            "split" => {
+                let n: i64 = raw.trim().parse().unwrap_or(self.settings.split as i64);
+                hint = self.settings.set_split(n);
+                if let Some(h) = hint.clone() { self.settings_hints.insert(field.into(), h); } else { self.settings_hints.remove(field); }
+                Ok(hint)
+            }
+            "connections_per_server" => {
+                let n: i64 = raw.trim().parse().unwrap_or(self.settings.max_connection_per_server as i64);
+                hint = self.settings.set_max_connection_per_server(n);
+                if let Some(h) = hint.clone() { self.settings_hints.insert(field.into(), h); } else { self.settings_hints.remove(field); }
+                Ok(hint)
+            }
+            "min_split_size" => self.settings.set_min_split_size_str(raw),
+            "dir" => match self.settings.set_dir(raw) {
+                Ok(()) => { self.settings_hints.remove(field); Ok(None) }
+                Err(e) => Err(e),
+            },
+            "max_tries" => {
+                let n: i64 = raw.trim().parse().unwrap_or(self.settings.max_tries as i64);
+                hint = self.settings.set_max_tries(n);
+                if let Some(h) = hint.clone() { self.settings_hints.insert(field.into(), h); } else { self.settings_hints.remove(field); }
+                Ok(hint)
+            }
+            "retry_wait" => {
+                let n: i64 = raw.trim().parse().unwrap_or(self.settings.retry_wait as i64);
+                hint = self.settings.set_retry_wait(n);
+                if let Some(h) = hint.clone() { self.settings_hints.insert(field.into(), h); } else { self.settings_hints.remove(field); }
+                Ok(hint)
+            }
+            _ => Ok(None),
+        };
+        match res {
+            Ok(maybe_hint) => {
+                if let Some(h) = maybe_hint { self.settings_hints.insert(field.into(), h); }
+                // limits/min_split manage hints themselves; for download/upload clear hint on success
+                if matches!(field, "download_limit" | "upload_limit") { self.settings_hints.remove(field); }
+                if field == "min_split_size" { /* set_min_split already handled hint above via Ok */ }
+                self.persist_settings();
+                let pair = self.settings.wire_pair(field);
+                self.settings_pending_rpc = Some(pair.clone());
+                if let Some(h) = self.settings_hints.get(field) {
+                    self.logs.push(format!("{} set to {} ({})", field, pair.1, h));
+                } else {
+                    self.logs.push(format!("{} set to {}", field, pair.1));
+                }
+            }
+            Err(e) => {
+                self.settings_error = Some(e.clone());
+                self.logs.push(format!("{} error: {}", field, e));
+            }
         }
     }
 
@@ -128,9 +257,60 @@ impl App {
             return false;
         }
 
-        // 1-6 view jumps
+        // Settings inline editing: when editing, capture typing first
+        if self.view == View::Settings && self.settings_editing.is_some() {
+            match key {
+                '\x1b' => { self.settings_editing = None; self.settings_error = None; self.dirty = true; return true; }
+                '\n' | '\r' => {
+                    let buf = self.settings_editing.take().unwrap();
+                    let field = SETTINGS_FIELDS[self.settings_selected].to_string();
+                    self.commit_settings_field(&field, &buf);
+                    self.dirty = true;
+                    return true;
+                }
+                '\x7f' => {
+                    if let Some(b) = &mut self.settings_editing { b.pop(); }
+                    self.dirty = true;
+                    return true;
+                }
+                c if !c.is_control() => {
+                    if let Some(b) = &mut self.settings_editing { b.push(c); }
+                    self.dirty = true;
+                    return true;
+                }
+                _ => return false,
+            }
+        }
+
+        // Settings navigation (when not editing)
+        if self.view == View::Settings {
+            match key {
+                'j' => {
+                    if self.settings_selected + 1 < SETTINGS_FIELDS.len() { self.settings_selected += 1; self.dirty = true; return true; }
+                    return false;
+                }
+                'k' => {
+                    if self.settings_selected > 0 { self.settings_selected -= 1; self.dirty = true; return true; }
+                    return false;
+                }
+                '\n' | '\r' => {
+                    let field = SETTINGS_FIELDS[self.settings_selected];
+                    let cur = self.settings_current_value(field);
+                    self.settings_editing = Some(cur);
+                    self.settings_error = None;
+                    self.dirty = true;
+                    return true;
+                }
+                '\x1b' => { self.settings_editing = None; self.settings_error = None; self.dirty = true; return true; }
+                _ => {}
+            }
+        }
+
+        // 1-6 view jumps (not while editing — handled above)
         if let Some(v) = View::from_key(key) {
             if self.view != v {
+                // cancel any pending settings edit on view leave
+                if self.view == View::Settings { self.settings_editing = None; }
                 self.view = v;
                 self.dirty = true;
                 return true;
@@ -374,17 +554,26 @@ impl App {
     }
 
     pub fn is_modal_open(&self) -> bool {
-        self.show_add_modal
+        self.show_add_modal || self.settings_editing.is_some()
     }
 
     // ---- vim-style movement ----
     pub fn move_top(&mut self) {
+        if self.view == View::Settings {
+            if self.settings_selected != 0 { self.settings_selected = 0; self.dirty = true; }
+            return;
+        }
         if self.selected != 0 {
             self.selected = 0;
             self.dirty = true;
         }
     }
     pub fn move_bottom(&mut self) {
+        if self.view == View::Settings {
+            let n = SETTINGS_FIELDS.len();
+            if self.settings_selected + 1 != n { self.settings_selected = n - 1; self.dirty = true; }
+            return;
+        }
         let n = self.flat_rows().len();
         if n > 0 && self.selected + 1 != n {
             self.selected = n - 1;
@@ -392,12 +581,23 @@ impl App {
         }
     }
     pub fn page_down(&mut self, lines: usize) {
+        if self.view == View::Settings {
+            let n = SETTINGS_FIELDS.len();
+            let next = (self.settings_selected + lines).min(n - 1);
+            if next != self.settings_selected { self.settings_selected = next; self.dirty = true; }
+            return;
+        }
         let n = self.flat_rows().len();
         if n == 0 { return; }
         let next = (self.selected + lines).min(n - 1);
         if next != self.selected { self.selected = next; self.dirty = true; }
     }
     pub fn page_up(&mut self, lines: usize) {
+        if self.view == View::Settings {
+            let next = self.settings_selected.saturating_sub(lines);
+            if next != self.settings_selected { self.settings_selected = next; self.dirty = true; }
+            return;
+        }
         let next = self.selected.saturating_sub(lines);
         if next != self.selected { self.selected = next; self.dirty = true; }
     }

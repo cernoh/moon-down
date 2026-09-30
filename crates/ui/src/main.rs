@@ -246,6 +246,7 @@ fn main_tui(state_dir: &Path) -> io::Result<()> {
     let mut boot_logs = Vec::new();
     let queue = load_or_seed(&state_path, &mut boot_logs);
     let mut app = App::new(queue);
+    app.init_settings(state_dir);
 
     // First run (or after a crash) starts the daemon; later runs just attach.
     match Daemon::ensure_running(state_dir, &std::env::current_exe()?, &default_download_dir(state_dir)) {
@@ -412,12 +413,33 @@ fn run(
                     if is_quit(k, app) {
                         break;
                     }
-                    if !handle_vim_nav(k, app, &mut pending_g) {
+                    // Settings view owns j/k etc.; don't let vim nav steal them
+                    let is_settings = app.view == moon_down_ui::app::View::Settings;
+                    let is_editing = app.settings_editing.is_some();
+                    if is_settings || is_editing {
+                        pending_g = false;
+                        let changed = app.handle_key(key_char(k));
+                        if changed { persist(app, state_path); }
+                        if let Some((ak, av)) = app.take_settings_rpc() {
+                            if let Some(d) = daemon.as_ref() {
+                                let req = d.change_global_option(&ak, &av, rpc_id);
+                                rpc_id += 1;
+                                if let Err(e) = d.client().post(&req) {
+                                    app.push_log(format!("settings apply failed: {e}"));
+                                } else {
+                                    app.push_log(format!("applied {ak}={av}"));
+                                }
+                            }
+                        }
+                        if is_editing || is_settings {
+                            // typing keys already handled; don't fall through
+                        }
+                    } else if !handle_vim_nav(k, app, &mut pending_g) {
                         if app.handle_key(key_char(k)) {
-                            // Write local edits straight away: the tick loop reloads
-                            // from disk, so an unsaved delete would come back.
                             persist(app, state_path);
                         }
+                    } else {
+                        // vim nav consumed
                     }
                 }
                 Event::Resize(_, _) => app.mark_dirty(),
