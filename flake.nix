@@ -4,16 +4,57 @@
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
   outputs =
-    { nixpkgs, ... }:
+    { self, nixpkgs, ... }:
     let
+      systems = [
+        "x86_64-linux"
+        "aarch64-linux"
+        "aarch64-darwin"
+      ];
+      linuxSystems = [
+        "x86_64-linux"
+        "aarch64-linux"
+      ];
+      forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f system nixpkgs.legacyPackages.${system});
+      forLinuxSystems = f: nixpkgs.lib.genAttrs linuxSystems (system: f system nixpkgs.legacyPackages.${system});
+
+      mkPackage =
+        pkgs:
+        pkgs.rustPlatform.buildRustPackage {
+          pname = "moon-down";
+          version = "0.1.0";
+          src = ./.;
+
+          cargoLock = {
+            lockFile = ./Cargo.lock;
+            outputHashes = {
+              "aria2-0.3.9" = "sha256-cztBSWPIWdG2DJriTC8Gq2vms79Mt9dZEzCFVjccnBA=";
+            };
+          };
+
+          nativeBuildInputs = with pkgs; [ pkg-config ];
+          # Default build needs no system libs; tray feature (off by default)
+          # would need gtk3 + libayatana-appindicator + pkg-config shim.
+
+          # No extra buildFeatures — default build is the TUI without --tray.
+          # Users wanting the tray can override:
+          #   (pkgs.moon-down.override { withTray = true; })  or build with
+          #   `nix build .#moon-down --impure` after editing, but we keep the
+          #   default closure GUI-free.
+
+          meta = with pkgs.lib; {
+            description = "Terminal download manager (ratatui + embedded aria2)";
+            homepage = "https://github.com/cernoh/moon-down";
+            license = licenses.mit;
+            mainProgram = "moon-down";
+            platforms = platforms.all;
+          };
+        };
+
       # One shell definition, reused per system, so the platforms cannot drift.
       mkShell =
         pkgs:
         let
-          # nixpkgs' libayatana-appindicator ships the shared library but no
-          # pkg-config file and no headers. The `libappindicator` crate that backs
-          # the tray feature uses hand-written FFI, so it only needs the .so at
-          # link time — a metadata-only .pc shim satisfies system-deps.
           appindicatorPc = pkgs.writeTextDir "pkgconfig/libayatana-appindicator3-0.1.pc" ''
             prefix=${pkgs.libayatana-appindicator}
             libdir=''${prefix}/lib
@@ -23,43 +64,24 @@
             Requires: glib-2.0 gio-2.0 gtk+-3.0
             Libs: -L''${libdir} -layatana-appindicator3
           '';
-
-          # libappindicator resolves the shared library with dlopen() by soname at
-          # runtime, so a link-time -L is not enough: the directory has to be on
-          # the loader path too or `--tray` aborts on startup.
-          trayLibPath = pkgs.lib.concatStringsSep ":"
-            (map (p: "${p}/lib") [ pkgs.libayatana-appindicator pkgs.gtk3 ]);
+          trayLibPath = pkgs.lib.concatStringsSep ":" (
+            map (p: "${p}/lib") [ pkgs.libayatana-appindicator pkgs.gtk3 ]
+          );
         in
         pkgs.mkShell {
           name = "moon-down";
-
           packages = with pkgs; [
-            # --- toolchain -------------------------------------------------------
             cargo
             rustc
             rustfmt
             clippy
-            # cargo fetches the aria2-rust git dependency; without this in the
-            # shell, `cargo build` cannot resolve it.
             git
-
-            # --- optional `tray` feature ----------------------------------------
-            # libayatana-appindicator is the StatusNotifierItem/AppIndicator
-            # backend the tray icon renders through. gtk3 is its toolkit.
             gtk3
             libayatana-appindicator
-
-            # --- runtime helpers the app shells out to -------------------------
-            # Archive extraction for both .7z and .rar delegates to `7z`
-            # (extract.rs resolves 7zz, then 7z; nixpkgs p7zip ships `7z`).
             p7zip
-
-            # pkg-config shim for the tray feature (see appindicatorPc above).
             appindicatorPc
           ];
-
           nativeBuildInputs = with pkgs; [ pkg-config ];
-
           shellHook = ''
             export PKG_CONFIG_PATH="${appindicatorPc}/pkgconfig:''${PKG_CONFIG_PATH:-}"
             export LD_LIBRARY_PATH="${trayLibPath}:''${LD_LIBRARY_PATH:-}"
@@ -70,20 +92,27 @@
             echo "  appindicator=$(pkg-config --modversion libayatana-appindicator3-0.1 2>/dev/null || echo unresolved)"
           '';
         };
-
-      shells = {
-        x86_64-linux = mkShell nixpkgs.legacyPackages.x86_64-linux;
-        aarch64-linux = mkShell nixpkgs.legacyPackages.aarch64-linux;
-        darwin = mkShell nixpkgs.legacyPackages.x86_64-darwin;
-      };
     in
     {
-      # `nix develop` with no arguments resolves devShells.<system>.default, so
-      # each system exposes itself as its own default.
-      devShells = {
-        x86_64-linux = { default = shells.x86_64-linux; };
-        aarch64-linux = { default = shells.aarch64-linux; };
-        darwin = { default = shells.darwin; };
+      packages = forAllSystems (system: pkgs: {
+        moon-down = mkPackage pkgs;
+        default = self.packages.${system}.moon-down;
+      });
+
+      apps = forAllSystems (system: pkgs: {
+        default = {
+          type = "app";
+          program = "${self.packages.${system}.moon-down}/bin/moon-down";
+        };
+        moon-down = self.apps.${system}.default;
+      });
+
+      overlays.default = final: prev: {
+        moon-down = mkPackage final;
       };
+
+      devShells = forLinuxSystems (_system: pkgs: {
+        default = mkShell pkgs;
+      });
     };
 }

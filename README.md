@@ -63,6 +63,29 @@ Its tickets are tracked in issues #15–#20.
   missing binary is an `ExtractFailed` with an install hint, and failures keep
   the archives for manual retry.
 
+## Nix flake
+
+Consumable from any flake:
+
+```nix
+# flake.nix inputs
+inputs.moon-down.url = "github:cernoh/moon-down";
+```
+```bash
+nix run github:cernoh/moon-down -- --help
+nix profile install github:cernoh/moon-down
+# overlay
+nixpkgs.overlays = [ inputs.moon-down.overlays.default ]; # -> pkgs.moon-down
+```
+
+Local:
+
+```bash
+nix build .#moon-down        # -> result/bin/moon-down
+nix run . -- --help
+nix flake check --all-systems
+```
+
 ## Build and test
 
 `cargo` is not on the default `PATH` in this dev environment:
