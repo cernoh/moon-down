@@ -95,6 +95,20 @@ Default section order:
 
 ## Verification
 
+- `nix develop` is the canonical dev shell (see `flake.nix`): cargo, rustc,
+  rustfmt, clippy, git, plus gtk3, libayatana-appindicator and p7zip for the
+  optional tray and archive-extraction paths. The bare
+  `nix shell nixpkgs#cargo nixpkgs#rustc` invocation below still works for
+  the default (no-GUI) build.
+- `flake.nix` carries a generated pkg-config shim for
+  `libayatana-appindicator3-0.1`, because nixpkgs packages the shared library
+  with no `.pc` file. `libappindicator` uses hand-written FFI and only needs the
+  `.so` at link time, so a metadata-only shim is enough.
+- To find a nix package attribute, use `nh search <term>`. Do not guess
+  attribute names from memory: `libayatana-appindicator3`, `xorg.libXdo` and
+  `unrar` were all wrong guesses, and `unrar` is unfree besides. The real names
+  are `libayatana-appindicator`, `xdo`, and (not needed at all, since .rar
+  routes through `7z`).
 - `cargo test` from the repo root covers all three crates (core, engine, ui)
 - `cargo` is not on the default PATH: run it as `nix shell nixpkgs#cargo nixpkgs#rustc -c cargo test`
 - Tests run in parallel by default. Tests must never mutate process-global state
@@ -132,13 +146,24 @@ Default section order:
   1-6/j/k/gg/G/Ctrl-D/U/F/B/arrows/h/l/Enter/space/d/D/r/x/e/a, settings screen, plus a
   status bar and a completed-history pane. Row heights and the accent colour derive from
   the design seed documented in `crates/ui/src/main.rs` — change the seed, not the
-  numbers. Two modes: plain `moon-down` is the TUI (ensures the daemon is up on first
+  numbers. Three modes: plain `moon-down` is the TUI (ensures the daemon is up on first
   run, then only polls it), `moon-down --daemon` is the aria2-rust host that self-detaches
-  and outlives the TUI. Progress is real, not simulated. Downloads land in
-  `default_download_dir` (XDG_DOWNLOAD_DIR, then ~/Downloads/moon-down, then the state
-  dir) — never inside the state dir when a real download dir exists.
-  `--enable-rpc=true` must be on argv: aria2-rust refuses an RPC-only service with no
-  download input otherwise
+  and outlives the TUI, `moon-down --tray` is the system-tray icon. Progress is real, not
+  simulated. Downloads land in `default_download_dir` (XDG_DOWNLOAD_DIR, then
+  ~/Downloads/moon-down, then the state dir) — never inside the state dir when a real
+  download dir exists. `--enable-rpc=true` must be on argv: aria2-rust refuses an
+  RPC-only service with no download input otherwise
+- `crates/ui/src/tray.rs` — optional `tray` cargo feature; off by default so the plain
+  build links no GUI libraries. A separate process, not part of the daemon: the daemon is
+  a tokio host and GTK wants its own main loop, so a GTK hiccup must not be able to take
+  downloads down. The icon is generated into raw RGBA (`Icon::from_rgba`) — no artwork
+  file and no dependence on the user's icon theme. Menu events are drained from
+  `MenuEvent::receiver()` on the main loop; muda's `set_event_handler` is unusable here
+  because it demands `Send + Sync` and `MenuItem` is `Rc`-based. `tray-icon` and `muda`
+  both default to a `libxdo` feature that nixpkgs cannot link (no `libxdo.so` is
+  packaged); keep `default-features = false` on both, or the build fails at link time.
+  That feature only gates muda's predefined Copy/Cut/Paste items, which this tray
+  does not use.
 - `.agents/skills/` — agent skills owned by this repo; `herdr/` documents driving the
   Herdr workspace CLI (layout IDs, tab/pane recipes, agent lifecycle). `herdr --skill`
   stays the upstream authority

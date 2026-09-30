@@ -42,7 +42,25 @@ fn main() -> io::Result<()> {
     if daemon_mode_from_args() {
         return run_daemon(&state_dir);
     }
+    if tray_mode_from_args() {
+        return run_tray(&state_dir);
+    }
     main_tui(&state_dir)
+}
+
+/// The tray icon is a separate process on purpose; see `tray.rs` for why.
+#[cfg(feature = "tray")]
+fn run_tray(state_dir: &Path) -> io::Result<()> {
+    moon_down_ui::tray::run(state_dir)
+}
+
+/// Without the feature this is a build-configuration error, not a runtime one,
+/// so say so plainly rather than silently ignoring the flag.
+#[cfg(not(feature = "tray"))]
+fn run_tray(_state_dir: &Path) -> io::Result<()> {
+    Err(io::Error::other(
+        "built without the `tray` feature — rebuild with: cargo build --features tray",
+    ))
 }
 
 fn main_tui(state_dir: &Path) -> io::Result<()> {
@@ -124,6 +142,10 @@ fn state_dir_from_args() -> PathBuf {
 
 fn daemon_mode_from_args() -> bool {
     std::env::args().skip(1).any(|a| a == "--daemon")
+}
+
+fn tray_mode_from_args() -> bool {
+    std::env::args().skip(1).any(|a| a == "--tray")
 }
 
 fn default_state_dir() -> String {
