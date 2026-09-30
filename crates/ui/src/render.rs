@@ -171,7 +171,7 @@ fn render_top(app: &App, frame: &mut Frame, area: Rect) {
         }
         View::Settings => {
             lines.push(Line::from(Span::styled(
-                " Settings — Queue/Speed/Threads/Paths  (arrows + Enter apply) ",
+                " Settings — j/k move  Enter edit  Esc cancel  (empty=unlimited) ",
                 Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
             )));
             lines.push(Line::from(" ─────────────────────────────────────────── "));
@@ -247,6 +247,10 @@ fn progress_bar(pct: u64) -> String {
 }
 
 fn render_detail(app: &App, frame: &mut Frame, area: Rect) {
+    if app.view == View::Settings {
+        render_settings_detail(app, frame, area);
+        return;
+    }
     let block = Block::default().borders(Borders::ALL).title(" Detail ");
     let content = if let Some(pid) = app.selected_package_id() {
         if let Some(pkg) = app.queue.find_package(pid) {
@@ -274,6 +278,32 @@ fn render_detail(app: &App, frame: &mut Frame, area: Rect) {
     };
     let para = Paragraph::new(content).block(block).wrap(Wrap { trim: true });
     frame.render_widget(para, area);
+}
+
+fn render_settings_detail(app: &App, frame: &mut Frame, area: Rect) {
+    let mut title = " Settings — aria2 globals (live apply, no restart) ".to_string();
+    if let Some(e) = &app.settings_error {
+        title = format!(" Settings — error: {e} ");
+    }
+    let block = Block::default().borders(Borders::ALL).title(title);
+    let mut lines: Vec<Line> = Vec::new();
+    for (idx, (k, v)) in app.settings_fields().into_iter().enumerate() {
+        let selected = idx == app.settings_selected;
+        let editing = selected && app.settings_editing.is_some();
+        let mut display = if editing { app.settings_editing.clone().unwrap_or_default() } else { v.clone() };
+        if display.is_empty() { display = "(unlimited)".into(); }
+        let hint = app.settings_hints.get(k).map(|h| format!(" — {h}")).unwrap_or_default();
+        let marker = if selected { "▶" } else { " " };
+        let edit_mark = if editing { " ✎" } else { "" };
+        let line = format!("{marker} {k:<28} {display}{edit_mark}{hint}");
+        let mut style = Style::default();
+        if selected { style = style.bg(Color::DarkGray).fg(Color::White); }
+        if editing { style = style.fg(Color::Yellow).add_modifier(Modifier::BOLD); }
+        lines.push(Line::from(Span::styled(line, style)));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(" Enter edit  Esc cancel  j/k move  1-6 switch view", Style::default().fg(Color::Gray))));
+    frame.render_widget(Paragraph::new(lines).block(block).wrap(Wrap { trim: false }), area);
 }
 
 fn render_log(app: &App, frame: &mut Frame, area: Rect) {
