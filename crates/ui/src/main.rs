@@ -35,7 +35,6 @@ use moon_down_ui::render::{human_bytes, render_with, ACCENT, DETAIL_ROWS, HISTOR
 
 const SEED: u64 = 27241;
 const TICK: Duration = Duration::from_millis((SEED % 4 + 1) as u64 * 1000);
-const FLUSH_EVERY_TICKS: u32 = 15; // ~30s at a 2s tick
 
 fn main() -> io::Result<()> {
     let state_dir = state_dir_from_args();
@@ -45,7 +44,186 @@ fn main() -> io::Result<()> {
     if tray_mode_from_args() {
         return run_tray(&state_dir);
     }
+    match cli_command() {
+        Some(cmd) => return run_cli_command(&cmd, &state_dir),
+        None => {}
+    }
     main_tui(&state_dir)
+}
+
+// ============================================================================
+// CLI
+//
+// The TUI's add modal is still a skeleton, so these are the supported way to
+// put something in the queue. They talk to the same daemon the TUI watches, so
+// a download added here shows up in the TUI on its next tick.
+// ============================================================================
+
+#[derive(Debug, PartialEq)]
+enum Cli {
+    Add { uris: Vec<String>, name: Option<String>, dir: Option<String> },
+    Ls,
+    Help,
+    Unknown(Vec<String>),
+}
+
+/// The first non-flag argument decides the command. Everything else is a
+/// positional for that command, which keeps parsing trivial and predictable.
+fn cli_command() -> Option<Cli> {
+    let words: Vec<String> = std::env::args().skip(1).filter(|a| !a.starts_with("--state-dir")).collect();
+    let mut it = words.iter();
+    let verb = it.next().map(String::as_str)?;
+    let rest: Vec<String> = it.cloned().collect();
+
+    match verb {
+        "add" | "a" => {
+            let mut uris = Vec::new();
+            let mut name = None;
+            let mut dir = None;
+            let mut it = rest.into_iter();
+            while let Some(a) = it.next() {
+                if let Some(v) = a.strip_prefix("--name=") {
+                    name = Some(v.to_string());
+                } else if let Some(v) = a.strip_prefix("--dir=") {
+                    dir = Some(v.to_string());
+                } else {
+                    uris.push(a);
+                }
+            }
+            Some(Cli::Add { uris, name, dir })
+        }
+        "ls" | "list" => Some(Cli::Ls),
+        "help" | "--help" | "-h" => Some(Cli::Help),
+        _ => Some(Cli::Unknown(words)),
+    }
+}
+
+fn run_cli_command(cmd: &Cli, state_dir: &Path) -> io::Result<()> {
+    match cmd {
+        Cli::Help => {
+            println!("{}", USAGE);
+            Ok(())
+        }
+        Cli::Unknown(words) => {
+            eprintln!("unknown command: {}\n\n{}", words.join(" "), USAGE);
+            Err(io::Error::other("bad command"))
+        }
+        Cli::Ls => {
+            // Live, not the last persisted file: the TUI only writes on local
+            // edits, so the file on disk can be stale. Fold in one daemon tick
+            // so `ls` reports what is actually happening right now.
+            let state_path = state_dir.join("state.json");
+            let mut queue = load_state(&state_path).unwrap_or_default();
+            let dl = default_download_dir(state_dir);
+            if let Ok(daemon) = Daemon::ensure_running(state_dir, &std::env::current_exe()?, &dl) {
+                match daemon.tick(1) {
+                    Ok(tick) => {
+                        tick.apply(&mut queue);
+                    }
+                    Err(e) => eprintln!("(daemon not answering: {e})"),
+                }
+            }
+            print_queue(&queue);
+            Ok(())
+        }
+        Cli::Add { uris, name, dir } => add_uris(state_dir, uris, name.as_deref(), dir.as_deref()),
+    }
+}
+
+const USAGE: &str = "\
+moon-down — terminal download manager
+
+  moon-down                    open the TUI
+  moon-down add <url>...      queue a download (see the TUI within a tick)
+      --name=NAME              package name shown in the queue
+      --dir=DIR                download directory (default: the configured one)
+  moon-down ls                 print the queue
+  moon-down --tray             system-tray icon (needs --features tray)
+
+Global: --state-dir=PATH";
+
+/// Queue one or more URIs as a single package.
+///
+/// The GID the daemon returns is stored as the member handle straight away:
+/// that is the join key `Tick::apply` uses to fold progress back into the row,
+/// so skipping it is what makes a download invisible in the TUI.
+fn add_uris(state_dir: &Path, uris: &[String], name: Option<&str>, dir: Option<&str>) -> io::Result<()> {
+    if uris.is_empty() {
+        eprintln!("nothing to add — give at least one URL");
+        return Err(io::Error::other("no urls"));
+    }
+    let exe = std::env::current_exe()?;
+    let download_dir = match dir {
+        Some(d) => PathBuf::from(d),
+        None => default_download_dir(state_dir),
+    };
+    let daemon = Daemon::ensure_running(state_dir, &exe, &download_dir)?;
+
+    // One addUri per URL. Passing them all in one call would make aria2 treat
+    // them as mirror sources for a single file — one GID, one output name, and
+    // the extra URLs would overwrite the first. Each URL is its own download.
+    let mut gids = Vec::new();
+    for uri in uris {
+        let gid = daemon
+            .enqueue(std::slice::from_ref(uri), &download_dir)
+            .map_err(|e| io::Error::other(format!("daemon refused {uri}: {e}")))?;
+        gids.push(gid);
+    }
+
+    let state_path = state_dir.join("state.json");
+    let mut queue = load_state(&state_path).unwrap_or_default();
+    let package_name = name.map(String::from).unwrap_or_else(|| {
+        // Name the package after its first file, which is what a user expects.
+        file_name_of(&uris[0])
+    });
+    let members: Vec<(String, String)> =
+        uris.iter().map(|u| (file_name_of(u), u.clone())).collect();
+    let id = queue.add_package(package_name, download_dir.display().to_string(), members);
+    if let Some(pkg) = queue.packages.iter_mut().find(|p| p.id == id) {
+        for (m, gid) in pkg.members.iter_mut().zip(&gids) {
+            m.handle = Some(gid.clone());
+            m.state = MemberState::Queued;
+        }
+    }
+    save_state(&queue, &state_path)
+        .map_err(|e| io::Error::other(format!("queued in the daemon but could not save state: {e}")))?;
+
+    println!("queued {id}  ->  {}", download_dir.display());
+    for (uri, gid) in uris.iter().zip(&gids) {
+        println!("  {gid}  {uri}");
+    }
+    Ok(())
+}
+
+/// Last path segment of a URL, ignoring query and fragment; falls back to the
+/// whole string so a name is always produced.
+fn file_name_of(uri: &str) -> String {
+    let without_scheme = uri.split("://").last().unwrap_or(uri);
+    let path = without_scheme
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(without_scheme);
+    path.rsplit('/')
+        .find(|s| !s.is_empty())
+        .unwrap_or(uri)
+        .to_string()
+}
+
+fn print_queue(queue: &Queue) {
+    if queue.packages.is_empty() {
+        println!("(empty) — add one with: moon-down add <url>");
+        return;
+    }
+    for pkg in &queue.packages {
+        let prog = (pkg.progress() * 100.0) as u64;
+        println!("{:<4} {:<28} [{:<8}] {:>3}%", pkg.id, pkg.name, format!("{:?}", pkg.status()), prog);
+        for m in &pkg.members {
+            println!(
+                "       └ {:<26} {:>9}/{:>9}  {:?}",
+                m.name, m.completed_bytes, m.total_bytes, m.state
+            );
+        }
+    }
 }
 
 /// The tray icon is a separate process on purpose; see `tray.rs` for why.
@@ -157,66 +335,33 @@ fn default_state_dir() -> String {
         + "/moon-down"
 }
 
-/// Restore the saved queue, or seed a first run so the UI is never blank.
+/// Restore the saved queue. A first run is genuinely empty — no demo rows.
+///
+/// An earlier version seeded three fake packages here. They had invented
+/// handles like `demo-live-1`, which can never match a real aria2 GID, so those
+/// rows could never show progress and only ever made the TUI look busy. An
+/// empty queue is honest; `moon-down add` fills it.
 fn load_or_seed(path: &Path, logs: &mut Vec<String>) -> Queue {
     match load_state(path) {
         Ok(q) if !q.packages.is_empty() => {
-            logs.push(format!("restored {} package(s) from {}", q.packages.len(), path.display()));
+            logs.push(format!(
+                "restored {} package(s) from {}",
+                q.packages.len(),
+                path.display()
+            ));
             q
         }
-        Ok(_) => seed_first_run(logs),
+        Ok(_) => {
+            logs.push("empty queue — add one with: moon-down add <url>".into());
+            Queue::new()
+        }
         Err(e) => {
-            logs.push(format!("no state at {} ({e}); seeding demo queue", path.display()));
-            seed_first_run(logs)
+            logs.push(format!("no state at {} ({e}); starting empty", path.display()));
+            Queue::new()
         }
     }
 }
 
-fn seed_first_run(logs: &mut Vec<String>) -> Queue {
-    let mut q = Queue::new();
-
-    // Something already finished, so the history pane has content on run one.
-    let done = q.add_package(
-        "blender-4.2-linux-x64.tar.xz",
-        "/home/user/Downloads/blender",
-        vec![("blender-4.2-linux-x64.tar.xz".into(), "https://download.blender.org/4.2/x".into())],
-    );
-    let m = q.packages[0].members[0].id;
-    q.set_member_handle(m, "demo-done-1".into());
-    q.set_member_progress(m, 291_234_304, 291_234_304);
-    q.set_member_state(m, MemberState::Complete);
-
-    // A multi-part post mid-flight, with one file finished.
-    let post = q.add_package(
-        "ubuntu-24.04-desktop-amd64",
-        "/home/user/Downloads/ubuntu",
-        vec![
-            ("ubuntu-24.04-desktop-amd64.iso".into(), "https://releases.ubuntu.com/24.04/ubuntu.iso".into()),
-            ("ubuntu-24.04-desktop-amd64.iso.asc".into(), "https://releases.ubuntu.com/24.04/ubuntu.iso.asc".into()),
-        ],
-    );
-    let ms: Vec<u64> = q.packages[1].members.iter().map(|m| m.id).collect();
-    q.set_member_handle(ms[0], "demo-live-1".into());
-    q.set_member_progress(ms[0], 6_204_733_440, 2_113_209_369);
-    q.set_member_state(ms[0], MemberState::Downloading);
-    q.set_member_handle(ms[1], "demo-live-2".into());
-    q.set_member_progress(ms[1], 833, 833);
-    q.set_member_state(ms[1], MemberState::Complete);
-
-    // One waiting its turn.
-    let queued = q.add_package(
-        "rust-1.90.0-x86_64-unknown-linux-gnu.tar.xz",
-        "/home/user/Downloads/rust",
-        vec![("rust-1.90.0.tar.xz".into(), "https://static.rust-lang.org/dist/rust.tar.xz".into())],
-    );
-    let m = q.packages[2].members[0].id;
-    q.set_member_handle(m, "demo-queued-1".into());
-    q.set_member_progress(m, 214_958_080, 0);
-    q.set_member_state(m, MemberState::Queued);
-
-    logs.push(format!("seeded {} package(s) (ids {done}, {post}, {queued})", q.packages.len()));
-    q
-}
 
 fn status_line(app: &App, daemon: Option<&Daemon>) -> String {
     let active = app
@@ -268,7 +413,11 @@ fn run(
                         break;
                     }
                     if !handle_vim_nav(k, app, &mut pending_g) {
-                        app.handle_key(key_char(k));
+                        if app.handle_key(key_char(k)) {
+                            // Write local edits straight away: the tick loop reloads
+                            // from disk, so an unsaved delete would come back.
+                            persist(app, state_path);
+                        }
                     }
                 }
                 Event::Resize(_, _) => app.mark_dirty(),
@@ -277,6 +426,12 @@ fn run(
             false => {
                 ticks += 1;
                 rpc_id += 4;
+                // Re-read the queue from disk every tick. `moon-down add` writes
+                // here, and this TUI holds its own copy in memory, so without a
+                // reload a CLI-added download never appears. Local edits are
+                // persisted the moment they happen (see handle_key) so this
+                // reload cannot undo them.
+                reload_queue(app, state_path);
                 // Attach on the first tick of a session and again after any failure,
                 // so a daemon that dies mid-session is picked back up.
                 if daemon.is_none() {
@@ -305,9 +460,6 @@ fn run(
                         daemon = None;
                     }
                     None => daemon = None,
-                }
-                if ticks % FLUSH_EVERY_TICKS == 0 {
-                    persist(app, state_path);
                 }
             }
         }
@@ -376,6 +528,21 @@ fn is_quit(k: KeyEvent, app: &App) -> bool {
     }
     // While the add modal is open, q belongs to the modal.
     k.code == KeyCode::Char('q') && !app.is_modal_open()
+}
+
+/// Pull in queue changes written by the CLI since the last tick. A read error
+/// is ignored: the in-memory queue is still the best thing we have.
+fn reload_queue(app: &mut App, state_path: &Path) {
+    if let Ok(fresh) = load_state(state_path) {
+        if fresh != app.queue {
+            let before = app.queue.packages.len();
+            app.queue = fresh;
+            if app.queue.packages.len() != before {
+                app.push_log(format!("queue reloaded ({} package(s))", app.queue.packages.len()));
+            }
+            app.mark_dirty();
+        }
+    }
 }
 
 fn persist(app: &mut App, path: &Path) {

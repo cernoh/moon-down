@@ -126,6 +126,32 @@ impl Daemon {
         self.client().tick(rpc_id)
     }
 
+    /// Hand a download to the daemon and return its GID.
+    ///
+    /// The GID is the join key: it is what the caller stores as the member's
+    /// handle, and what `Tick::apply` matches on later. Storing anything else
+    /// there is why rows never show progress.
+    pub fn enqueue(&self, uris: &[String], dir: &Path) -> Result<String, ClientError> {
+        if uris.is_empty() {
+            return Err(ClientError::Transport("no URI given".into()));
+        }
+        let (request, _stored) = crate::rpc::build_enqueue(
+            &self.info.secret,
+            crate::rpc::EnqueueKind::Uris(uris.to_vec()),
+            0,
+        );
+        let mut request = request;
+        if let Some(params) = request["params"].get_mut(2).and_then(Value::as_object_mut) {
+            params.insert("dir".into(), Value::String(dir.display().to_string()));
+        }
+        let reply = self.client().post(&request)?;
+        reply
+            .get("result")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| ClientError::BadReply(format!("no gid in reply: {reply}")))
+    }
+
     /// Live-apply one global option with no restart: one authenticated RPC call.
     pub fn change_global_option(&self, key: &str, value: &str, id: u64) -> Value {
         crate::rpc::build_change_global_option(&self.info.secret, key, value, id)
@@ -255,5 +281,16 @@ mod tests {
         assert!(d.tick(1).is_err());
         assert!(!d.stop());
         assert!(!Daemon::alive(&d.info));
+    }
+
+    #[test]
+    fn enqueue_rejects_an_empty_uri_list_before_touching_the_network() {
+        let dir = tempdir().unwrap();
+        let d = Daemon {
+            state_dir: dir.path().to_path_buf(),
+            info: DaemonInfo { port: 1, secret: "x".into() },
+        };
+        // Guarded up front, so this must fail on the URI check, not on a connect.
+        assert!(d.enqueue(&[], dir.path()).is_err());
     }
 }

@@ -23,6 +23,12 @@
             Requires: glib-2.0 gio-2.0 gtk+-3.0
             Libs: -L''${libdir} -layatana-appindicator3
           '';
+
+          # libappindicator resolves the shared library with dlopen() by soname at
+          # runtime, so a link-time -L is not enough: the directory has to be on
+          # the loader path too or `--tray` aborts on startup.
+          trayLibPath = pkgs.lib.concatStringsSep ":"
+            (map (p: "${p}/lib") [ pkgs.libayatana-appindicator pkgs.gtk3 ]);
         in
         pkgs.mkShell {
           name = "moon-down";
@@ -56,6 +62,7 @@
 
           shellHook = ''
             export PKG_CONFIG_PATH="${appindicatorPc}/pkgconfig:''${PKG_CONFIG_PATH:-}"
+            export LD_LIBRARY_PATH="${trayLibPath}:''${LD_LIBRARY_PATH:-}"
             echo "moon-down dev shell"
             echo "  cargo test                    # default build, no GUI deps"
             echo "  cargo build --features tray   # adds the --tray status icon"

@@ -153,6 +153,15 @@ Default section order:
   ~/Downloads/moon-down, then the state dir) — never inside the state dir when a real
   download dir exists. `--enable-rpc=true` must be on argv: aria2-rust refuses an
   RPC-only service with no download input otherwise
+- CLI: `moon-down add <url>...` (one download per URL, `--name=`, `--dir=`) and
+  `moon-down ls` (live: folds in a daemon tick rather than reading the persisted file).
+  `add` stores the returned GID as the member handle immediately — that is the join key
+  `Tick::apply` matches on, and skipping it is what makes a download invisible in the TUI.
+  There is no demo seeding: a first run is an empty queue, because invented handles like
+  `demo-live-1` can never match a real GID and only made the TUI look busy.
+  The TUI reloads `state.json` every tick so CLI additions appear within ~2s, and
+  persists immediately on any local key edit so the reload cannot undo it. Do not
+  reintroduce a periodic flush: it would race the CLI for the same file.
 - `crates/ui/src/tray.rs` — optional `tray` cargo feature; off by default so the plain
   build links no GUI libraries. A separate process, not part of the daemon: the daemon is
   a tokio host and GTK wants its own main loop, so a GTK hiccup must not be able to take
